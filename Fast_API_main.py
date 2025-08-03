@@ -11,6 +11,11 @@ from datetime import datetime
 
 app = FastAPI()
 
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "Sign Language Recognition API"}
+
 # 디버깅 로그
 debug_log_file = "debug_log.txt"
 def log_debug(message):
