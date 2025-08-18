@@ -1,3 +1,5 @@
 /.env
 debug_*.txt
 *.mp4
+*.pyc
+*.pth
