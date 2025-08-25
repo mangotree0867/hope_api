@@ -261,7 +261,7 @@ if not os.path.exists(LABELS_CSV_PATH):
     raise FileNotFoundError(f"Labels CSV file '{LABELS_CSV_PATH}' not found. Please check the path.")
 df = pd.read_csv(LABELS_CSV_PATH)
 label_encoder = LabelEncoder()
-label_encoder.fit(df['number'])
+label_encoder.fit(df['labels'])
 NUM_CLASSES = len(label_encoder.classes_)
 
 if not os.path.exists(WORD_LIST_CSV_PATH):
