@@ -252,7 +252,7 @@ class PredictionResponse(BaseModel):
 
 # --- Load model and class mapping ---
 # **아래 경로를 실제 파일의 절대 경로로 수정하세요.**
-LABELS_CSV_PATH = "/Users/mango/hope_api/SL_Partner_Word_List_01.csv"
+LABELS_CSV_PATH = "/Users/mango/hope_api/labels.csv"
 WORD_LIST_CSV_PATH = "/Users/mango/hope_api/SL_Partner_Word_List_01.csv"
 MODEL_PATH = "/Users/mango/hope_api/model2/best_model.pth"
 
