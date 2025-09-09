@@ -1,4 +1,11 @@
 import os
+import warnings
+
+# Suppress warnings early before importing protobuf-dependent modules
+warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.symbol_database")
+warnings.filterwarnings("ignore", message=".*SymbolDatabase.GetPrototype.*")
+warnings.filterwarnings("ignore", message="A column-vector y was passed when a 1d array was expected")
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -8,8 +15,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.preprocessing import LabelEncoder
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import asyncio
+import json
 import base64
 from PIL import Image
 from io import BytesIO
@@ -261,7 +271,7 @@ if not os.path.exists(LABELS_CSV_PATH):
     raise FileNotFoundError(f"Labels CSV file '{LABELS_CSV_PATH}' not found. Please check the path.")
 df = pd.read_csv(LABELS_CSV_PATH)
 label_encoder = LabelEncoder()
-label_encoder.fit(df['labels'])
+label_encoder.fit(df['labels'].values.ravel())
 NUM_CLASSES = len(label_encoder.classes_)
 
 if not os.path.exists(WORD_LIST_CSV_PATH):
@@ -279,6 +289,205 @@ try:
     model.eval()
 except Exception as e:
     raise RuntimeError(f"Error loading model: {e}")
+
+
+class StreamingVideoProcessor:
+    """Process video stream and make predictions on sliding windows of frames"""
+    
+    def __init__(self, window_size=30, stride=15):
+        self.window_size = window_size  # Number of frames for one prediction
+        self.stride = stride  # How many frames to slide the window
+        self.frame_buffer = []
+        self.prev_pose = None
+        self.prev_left = None
+        self.prev_right = None
+        self.frame_count = 0
+        
+    async def process_frame(self, frame):
+        """Process a single frame and return prediction if window is ready"""
+        # Extract features from frame
+        all_features, curr_pose, curr_left, curr_right, _, _ = extract_all_features(
+            frame, self.prev_pose, self.prev_left, self.prev_right
+        )
+        
+        # Update previous landmarks
+        self.prev_pose = curr_pose
+        self.prev_left = curr_left
+        self.prev_right = curr_right
+        
+        # Add to buffer
+        self.frame_buffer.append(all_features)
+        self.frame_count += 1
+        
+        # Check if we have enough frames for prediction
+        if len(self.frame_buffer) >= self.window_size:
+            # Make prediction on current window
+            prediction = await self._predict_window()
+            
+            # Slide the window
+            if self.frame_count % self.stride == 0:
+                self.frame_buffer = self.frame_buffer[self.stride:]
+            
+            return prediction
+        
+        return None
+    
+    async def _predict_window(self):
+        """Make prediction on current window of frames"""
+        if len(self.frame_buffer) < 10:  # Minimum frames
+            return None
+            
+        # Convert buffer to tensor
+        sequence_tensor = torch.stack([
+            torch.tensor(s, dtype=torch.float32) for s in self.frame_buffer[:self.window_size]
+        ])
+        
+        # Pad if needed
+        if sequence_tensor.size(0) < MAX_SEQ_LENGTH:
+            sequence_tensor = F.pad(
+                sequence_tensor, 
+                (0, 0, 0, MAX_SEQ_LENGTH - sequence_tensor.size(0)), 
+                'constant', 0
+            )
+        
+        sequence_tensor = sequence_tensor.unsqueeze(0).to(device)
+        
+        # Make prediction
+        with torch.no_grad():
+            outputs = model(sequence_tensor)
+        
+        probs = F.softmax(outputs, dim=1)
+        top_probs, top_indices = torch.topk(probs, k=min(3, probs.size(1)))
+        
+        predictions = []
+        for prob, idx in zip(top_probs[0], top_indices[0]):
+            label = label_encoder.inverse_transform([idx.cpu().numpy()])[0]
+            word = word_mapping.get(label, label)
+            predictions.append({
+                "word": word,
+                "confidence": float(prob.cpu().numpy())
+            })
+        
+        return predictions
+
+class VideoPredictionResponse(BaseModel):
+    prediction: Dict[str, Union[str, float]]  # Single prediction result
+    top_predictions: List[Dict[str, Union[str, float]]]  # Top 3 predictions
+    summary: Dict[str, Union[int, float, str]]
+    sentence: str
+
+@app.post("/predict-video", response_model=PredictionResponse)
+async def predict_video(
+    file: UploadFile = File(..., description="Video file to process")
+):
+    """
+    Process entire video using same logic as predict_sequence.
+    
+    Args:
+        file: Video file upload
+    
+    Returns:
+        Prediction response matching predict_sequence format
+    """
+    import tempfile
+    
+    # Validate file type
+    allowed_extensions = ['.mp4', '.avi', '.mov', '.webm', '.mkv']
+    file_ext = os.path.splitext(file.filename)[1].lower() if file.filename else '.mp4'
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Allowed types: {', '.join(allowed_extensions)}"
+        )
+    
+    # Read video file
+    video_bytes = await file.read()
+    
+    # Save to temp file
+    with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp_file:
+        tmp_file.write(video_bytes)
+        tmp_path = tmp_file.name
+    
+    try:
+        # Extract all frames from video
+        cap = cv2.VideoCapture(tmp_path)
+        if not cap.isOpened():
+            raise HTTPException(status_code=400, detail="Could not open video file")
+        
+        frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frames.append(frame)
+        cap.release()
+        
+        log_debug(f"Extracted {len(frames)} frames from video")
+        
+        # Extract features from all frames (same as predict_sequence)
+        sequence_buffer = []
+        prev_pose, prev_left, prev_right = None, None, None
+        
+        for frame in frames:
+            all_features, curr_pose, curr_left, curr_right, _, _ = extract_all_features(
+                frame, prev_pose, prev_left, prev_right
+            )
+            sequence_buffer.append(all_features)
+            prev_pose, prev_left, prev_right = curr_pose, curr_left, curr_right
+        
+        log_debug(f"Extracted features from {len(sequence_buffer)} frames")
+        
+        frame_count = len(sequence_buffer)
+        if frame_count < 10:  # Minimum frames for a meaningful prediction
+            return PredictionResponse(
+                words=[],
+                sentence="",
+                message=f"Sequence too short ({frame_count} frames). Minimum 10 frames required."
+            )
+        
+        # Same processing as predict_sequence
+        sequence_list = list(sequence_buffer)
+        sequence_tensor = torch.stack([torch.tensor(s, dtype=torch.float32) for s in sequence_list])
+        sequence_tensor = F.pad(sequence_tensor, (0, 0, 0, MAX_SEQ_LENGTH - sequence_tensor.size(0)), 'constant', 0)
+        sequence_tensor = sequence_tensor.unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            outputs = model(sequence_tensor)
+        
+        probs = F.softmax(outputs, dim=1)
+        predicted_idx = outputs.argmax(1).item()
+        confidence = probs[0][predicted_idx].item()
+        
+        words_list = []
+        sentence_text = ""
+        message = ""
+        
+        if confidence > 0.5:
+            predicted_label = label_encoder.inverse_transform([predicted_idx])[0]
+            predicted_word = word_mapping.get(predicted_label, predicted_label)
+            words_list.append({"word": predicted_word, "confidence": confidence})
+            
+            # 문장 생성 로직: 단어가 2개 이상일 때만 문장 생성
+            if len(words_list) >= 2:
+                sentence_text = generate_emergency_sentence([w['word'] for w in words_list])
+            else:
+                message = "예측된 단어가 충분하지 않아 문장을 생성할 수 없습니다."
+        else:
+            message = "Prediction failed with low confidence."
+        
+        return PredictionResponse(
+            words=words_list,
+            sentence=sentence_text,
+            message=message
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 @app.post("/predict_sequence", response_model=PredictionResponse)
 async def predict_sequence(request: PredictionRequest):
