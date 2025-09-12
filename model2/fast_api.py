@@ -10,14 +10,18 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.preprocessing import LabelEncoder
-from fastapi import FastAPI, HTTPException, File, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, File, UploadFile, WebSocket, WebSocketDisconnect, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, Integer, String, Text, Float, DateTime, LargeBinary, Boolean
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.sql import func
 import asyncio
 import json
 import base64
@@ -30,12 +34,25 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+# Settings configuration
+class Settings:
+    def __init__(self):
+        self.database_url = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/hope_api_db")
+        self.google_api_key = os.getenv("GOOGLE_API_KEY")
+        
+        if not self.google_api_key:
+            raise ValueError("GOOGLE_API_KEY not found in environment variables")
+
+settings = Settings()
+
 # Gemini API 설정
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY not found in environment variables")
-genai.configure(api_key=GOOGLE_API_KEY)
+genai.configure(api_key=settings.google_api_key)
 gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+
+# Database setup
+engine = create_engine(settings.database_url)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
 # --- Hyperparameters and Settings (Matching training code) ---
 MAX_SEQ_LENGTH = 50
@@ -249,8 +266,52 @@ def generate_emergency_sentence(words):
         log_debug(f"Gemini API 문장 생성 실패 (generate_emergency_sentence): {str(e)}")
         return " ".join(words) + " 도와주세요."
 
+# --- Database Models ---
+class ChatRecord(Base):
+    __tablename__ = "chat_records"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=True)
+    session_id = Column(String, index=True, nullable=True)
+    predicted_word = Column(String, nullable=False)
+    confidence = Column(Float, nullable=False)
+    generated_sentence = Column(Text, nullable=True)
+    input_type = Column(String, nullable=False)  # "video" or "image_sequence"
+    frame_count = Column(Integer, nullable=True)
+    processing_time = Column(Float, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+class VideoRecord(Base):
+    __tablename__ = "video_records"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=True)
+    session_id = Column(String, index=True, nullable=True)
+    filename = Column(String, nullable=False)
+    file_size = Column(Integer, nullable=False)
+    file_path = Column(String, nullable=False)  # Path to stored file
+    file_extension = Column(String, nullable=False)
+    duration = Column(Float, nullable=True)
+    frame_count = Column(Integer, nullable=True)
+    is_processed = Column(Boolean, default=False)
+    chat_record_id = Column(Integer, nullable=True)  # Link to prediction result
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+# Database dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 # --- FastAPI Initialization and Endpoint ---
-app = FastAPI()
+app = FastAPI(title="Hope API - Sign Language Recognition", version="1.0.0")
 
 class PredictionRequest(BaseModel):
     image_sequence: List[str]  # List of Base64 encoded images
@@ -378,7 +439,10 @@ class VideoPredictionResponse(BaseModel):
 
 @app.post("/predict-video", response_model=PredictionResponse)
 async def predict_video(
-    file: UploadFile = File(..., description="Video file to process")
+    file: UploadFile = File(..., description="Video file to process"),
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    db: Session = Depends(get_db)
 ):
     """
     Process entire video using same logic as predict_sequence.
@@ -409,10 +473,29 @@ async def predict_video(
         tmp_path = tmp_file.name
     
     try:
+        # Save video record to database
+        video_record = VideoRecord(
+            user_id=user_id,
+            session_id=session_id,
+            filename=file.filename or "unknown.mp4",
+            file_size=len(video_bytes),
+            file_path=tmp_path,
+            file_extension=file_ext,
+            is_processed=False
+        )
+        db.add(video_record)
+        db.commit()
+        db.refresh(video_record)
+        
         # Extract all frames from video
         cap = cv2.VideoCapture(tmp_path)
         if not cap.isOpened():
             raise HTTPException(status_code=400, detail="Could not open video file")
+        
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = total_frames / fps if fps > 0 else None
         
         frames = []
         while True:
@@ -421,6 +504,11 @@ async def predict_video(
                 break
             frames.append(frame)
         cap.release()
+        
+        # Update video record with frame info
+        video_record.duration = duration
+        video_record.frame_count = len(frames)
+        db.commit()
         
         log_debug(f"Extracted {len(frames)} frames from video")
         
@@ -472,8 +560,30 @@ async def predict_video(
                 sentence_text = generate_emergency_sentence([w['word'] for w in words_list])
             else:
                 message = "예측된 단어가 충분하지 않아 문장을 생성할 수 없습니다."
+            
+            # Save chat record to database
+            chat_record = ChatRecord(
+                user_id=user_id,
+                session_id=session_id,
+                predicted_word=predicted_word,
+                confidence=confidence,
+                generated_sentence=sentence_text,
+                input_type="video",
+                frame_count=len(frames)
+            )
+            db.add(chat_record)
+            db.commit()
+            db.refresh(chat_record)
+            
+            # Update video record with chat record link
+            video_record.chat_record_id = chat_record.id
+            video_record.is_processed = True
+            db.commit()
         else:
             message = "Prediction failed with low confidence."
+            # Still mark video as processed
+            video_record.is_processed = True
+            db.commit()
         
         return PredictionResponse(
             words=words_list,
@@ -490,7 +600,12 @@ async def predict_video(
             os.remove(tmp_path)
 
 @app.post("/predict_sequence", response_model=PredictionResponse)
-async def predict_sequence(request: PredictionRequest):
+async def predict_sequence(
+    request: PredictionRequest,
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
     """
     Predicts a sign language word from a sequence of images and generates an emergency sentence.
     Input should be a list of Base64 encoded images representing a sequence.
@@ -551,6 +666,20 @@ async def predict_sequence(request: PredictionRequest):
             sentence_text = generate_emergency_sentence([w['word'] for w in words_list])
         else:
             message = "예측된 단어가 충분하지 않아 문장을 생성할 수 없습니다."
+        
+        # Save chat record to database
+        chat_record = ChatRecord(
+            user_id=user_id,
+            session_id=session_id,
+            predicted_word=predicted_word,
+            confidence=confidence,
+            generated_sentence=sentence_text,
+            input_type="image_sequence",
+            frame_count=frame_count
+        )
+        db.add(chat_record)
+        db.commit()
+        db.refresh(chat_record)
     else:
         message = "Prediction failed with low confidence."
 
@@ -559,6 +688,81 @@ async def predict_sequence(request: PredictionRequest):
         sentence=sentence_text,
         message=message
     )
+
+# --- Database Query Endpoints ---
+@app.get("/chat-records")
+async def get_chat_records(
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db)
+):
+    """Get chat records with optional filtering"""
+    query = db.query(ChatRecord)
+    
+    if user_id:
+        query = query.filter(ChatRecord.user_id == user_id)
+    if session_id:
+        query = query.filter(ChatRecord.session_id == session_id)
+    
+    records = query.order_by(ChatRecord.created_at.desc()).offset(offset).limit(limit).all()
+    
+    return {
+        "records": [
+            {
+                "id": record.id,
+                "user_id": record.user_id,
+                "session_id": record.session_id,
+                "predicted_word": record.predicted_word,
+                "confidence": record.confidence,
+                "generated_sentence": record.generated_sentence,
+                "input_type": record.input_type,
+                "frame_count": record.frame_count,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at
+            } for record in records
+        ],
+        "total": query.count()
+    }
+
+@app.get("/video-records")
+async def get_video_records(
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db)
+):
+    """Get video records with optional filtering"""
+    query = db.query(VideoRecord)
+    
+    if user_id:
+        query = query.filter(VideoRecord.user_id == user_id)
+    if session_id:
+        query = query.filter(VideoRecord.session_id == session_id)
+    
+    records = query.order_by(VideoRecord.created_at.desc()).offset(offset).limit(limit).all()
+    
+    return {
+        "records": [
+            {
+                "id": record.id,
+                "user_id": record.user_id,
+                "session_id": record.session_id,
+                "filename": record.filename,
+                "file_size": record.file_size,
+                "file_extension": record.file_extension,
+                "duration": record.duration,
+                "frame_count": record.frame_count,
+                "is_processed": record.is_processed,
+                "chat_record_id": record.chat_record_id,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at
+            } for record in records
+        ],
+        "total": query.count()
+    }
 
 @app.get("/")
 async def root():
