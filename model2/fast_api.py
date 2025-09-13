@@ -1,5 +1,9 @@
 import os
+import sys
 import warnings
+
+# Add current directory to Python path for module imports
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Suppress warnings early before importing protobuf-dependent modules
 warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.symbol_database")
@@ -15,24 +19,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.preprocessing import LabelEncoder
-from fastapi import FastAPI, HTTPException, File, UploadFile, WebSocket, WebSocketDisconnect, Depends
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, File, UploadFile, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Text, Float, DateTime, LargeBinary, Boolean
+from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.sql import func
-import asyncio
-import json
 import base64
-from PIL import Image
-from io import BytesIO
 import google.generativeai as genai
 from datetime import datetime
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Import authentication models
+from auth_model import (
+    User, UserSession, UserCreate, UserLogin, TokenResponse, UserResponse,
+    AuthService, token_manager
+)
+
+# Import chat models
+from chat_model import (
+    ChatSession, ChatMessage, ChatRecord, VideoRecord,
+    ChatService
+)
 
 # Settings configuration
 class Settings:
@@ -266,41 +278,15 @@ def generate_emergency_sentence(words):
         log_debug(f"Gemini API 문장 생성 실패 (generate_emergency_sentence): {str(e)}")
         return " ".join(words) + " 도와주세요."
 
-# --- Database Models ---
-class ChatRecord(Base):
-    __tablename__ = "chat_records"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, index=True, nullable=True)
-    session_id = Column(String, index=True, nullable=True)
-    predicted_word = Column(String, nullable=False)
-    confidence = Column(Float, nullable=False)
-    generated_sentence = Column(Text, nullable=True)
-    input_type = Column(String, nullable=False)  # "video" or "image_sequence"
-    frame_count = Column(Integer, nullable=True)
-    processing_time = Column(Float, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+# Database models are now imported from chat_model.py
 
-class VideoRecord(Base):
-    __tablename__ = "video_records"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, index=True, nullable=True)
-    session_id = Column(String, index=True, nullable=True)
-    filename = Column(String, nullable=False)
-    file_size = Column(Integer, nullable=False)
-    file_path = Column(String, nullable=False)  # Path to stored file
-    file_extension = Column(String, nullable=False)
-    duration = Column(Float, nullable=True)
-    frame_count = Column(Integer, nullable=True)
-    is_processed = Column(Boolean, default=False)
-    chat_record_id = Column(Integer, nullable=True)  # Link to prediction result
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+# Create tables from all models
+from auth_model import Base as AuthBase
+from chat_model import Base as ChatBase
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+# Create all tables
+AuthBase.metadata.create_all(bind=engine)
+ChatBase.metadata.create_all(bind=engine)
 
 # Database dependency
 def get_db():
@@ -310,8 +296,201 @@ def get_db():
     finally:
         db.close()
 
+# Authentication dependency - gets current user from token
+def get_authenticated_user(
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+    db: Session = Depends(get_db)
+) -> User:
+    """
+    Dependency to get the current authenticated user.
+    Use this in any endpoint that requires authentication.
+    """
+    if not credentials or credentials.scheme != "Bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication scheme"
+        )
+
+    # Verify token and get user info
+    token_payload = AuthService.verify_token(credentials.credentials, db)
+    user_id = token_payload.get("user_id")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    return user
+
 # --- FastAPI Initialization and Endpoint ---
 app = FastAPI(title="Hope API - Sign Language Recognition", version="1.0.0")
+
+# --- Authentication Endpoints ---
+@app.post("/auth/register", response_model=TokenResponse)
+async def register(
+    user_data: UserCreate,
+    db: Session = Depends(get_db)
+):
+    """
+    Register a new user and return an access token
+    """
+    # Check if user already exists
+    existing_user = db.query(User).filter(User.login_id == user_data.login_id).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User with this login_id already exists"
+        )
+
+    # Check if email already exists
+    existing_email = db.query(User).filter(User.email == user_data.email).first()
+    if existing_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User with this email already exists"
+        )
+
+    # Create new user
+    salt = AuthService.generate_salt()
+    password_hash = AuthService.hash_password(user_data.password, salt)
+
+    new_user = User(
+        name=user_data.name,
+        login_id=user_data.login_id,
+        email=user_data.email,
+        password_hash=password_hash,
+        salt=salt
+    )
+
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    # Generate access token
+    access_token = AuthService.create_access_token(new_user.id, new_user.login_id)
+
+    # Create session
+    session = UserSession(
+        user_id=new_user.id,
+        session_token=access_token
+    )
+    db.add(session)
+    db.commit()
+
+    user_response = UserResponse(
+        id=new_user.id,
+        name=new_user.name,
+        login_id=new_user.login_id,
+        email=new_user.email,
+        created_at=new_user.created_at
+    )
+
+    return TokenResponse(
+        access_token=access_token,
+        user=user_response
+    )
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(
+    credentials: UserLogin,
+    db: Session = Depends(get_db)
+):
+    """
+    Login user and return an access token
+    """
+    # Find user by login_id
+    user = db.query(User).filter(User.login_id == credentials.login_id).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid login credentials"
+        )
+
+    # Verify password
+    if not AuthService.verify_password(credentials.password, user.salt, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid login credentials"
+        )
+
+    # Generate access token
+    access_token = AuthService.create_access_token(user.id, user.login_id)
+
+    # Create or update session
+    existing_session = db.query(UserSession).filter(
+        UserSession.user_id == user.id,
+        UserSession.is_valid == True
+    ).first()
+
+    if existing_session:
+        # Invalidate old session
+        existing_session.is_valid = False
+        db.commit()
+
+    # Create new session
+    new_session = UserSession(
+        user_id=user.id,
+        session_token=access_token
+    )
+    db.add(new_session)
+    db.commit()
+
+    user_response = UserResponse(
+        id=user.id,
+        name=user.name,
+        login_id=user.login_id,
+        email=user.email,
+        created_at=user.created_at
+    )
+
+    return TokenResponse(
+        access_token=access_token,
+        user=user_response
+    )
+
+@app.post("/auth/logout")
+async def logout(
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+    db: Session = Depends(get_db)
+):
+    """
+    Logout user by invalidating their session
+    """
+    if not credentials or credentials.scheme != "Bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication scheme"
+        )
+
+    # Find and invalidate the specific session token
+    session = db.query(UserSession).filter(
+        UserSession.session_token == credentials.credentials,
+        UserSession.is_valid == True
+    ).first()
+
+    if session:
+        session.is_valid = False
+        db.commit()
+
+    return {"message": "Successfully logged out"}
+
+@app.get("/auth/me", response_model=UserResponse)
+async def get_current_user_info(
+    current_user: User = Depends(get_authenticated_user)
+):
+    """
+    Get current authenticated user info
+    """
+    return UserResponse(
+        id=current_user.id,
+        name=current_user.name,
+        login_id=current_user.login_id,
+        email=current_user.email,
+        created_at=current_user.created_at
+    )
 
 class PredictionRequest(BaseModel):
     image_sequence: List[str]  # List of Base64 encoded images
@@ -320,6 +499,9 @@ class PredictionResponse(BaseModel):
     words: List[Dict[str, Union[str, float]]]
     sentence: str
     message: str
+    session_id: int
+    user_message_id: Optional[int] = None
+    assistant_message_id: Optional[int] = None
 
 # --- Load model and class mapping ---
 # **아래 경로를 실제 파일의 절대 경로로 수정하세요.**
@@ -440,21 +622,34 @@ class VideoPredictionResponse(BaseModel):
 @app.post("/predict-video", response_model=PredictionResponse)
 async def predict_video(
     file: UploadFile = File(..., description="Video file to process"),
-    user_id: Optional[str] = None,
-    session_id: Optional[str] = None,
+    current_user: User = Depends(get_authenticated_user),
+    session_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
     """
-    Process entire video using same logic as predict_sequence.
-    
-    Args:
-        file: Video file upload
-    
-    Returns:
-        Prediction response matching predict_sequence format
+    Process video file and manage chat session.
+    Creates new session if none provided, adds user message and assistant response.
     """
     import tempfile
-    
+
+    # Get or create session
+    if session_id:
+        session = db.query(ChatSession).filter(
+            ChatSession.id == session_id,
+            ChatSession.user_id == current_user.id
+        ).first()
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found or access denied")
+    else:
+        # Create new session
+        session = ChatSession(
+            user_id=current_user.id,
+            session_title="New Sign Language Session"
+        )
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+
     # Validate file type
     allowed_extensions = ['.mp4', '.avi', '.mov', '.webm', '.mkv']
     file_ext = os.path.splitext(file.filename)[1].lower() if file.filename else '.mp4'
@@ -475,8 +670,8 @@ async def predict_video(
     try:
         # Save video record to database
         video_record = VideoRecord(
-            user_id=user_id,
-            session_id=session_id,
+            user_id=str(current_user.id),
+            session_id=str(session_id) if session_id else None,
             filename=file.filename or "unknown.mp4",
             file_size=len(video_bytes),
             file_path=tmp_path,
@@ -530,7 +725,8 @@ async def predict_video(
             return PredictionResponse(
                 words=[],
                 sentence="",
-                message=f"Sequence too short ({frame_count} frames). Minimum 10 frames required."
+                message=f"Sequence too short ({frame_count} frames). Minimum 10 frames required.",
+                session_id=session.id
             )
         
         # Same processing as predict_sequence
@@ -549,46 +745,68 @@ async def predict_video(
         words_list = []
         sentence_text = ""
         message = ""
-        
+        user_message_id = None
+        assistant_message_id = None
+
+        # Add user message to chat (video uploaded)
+        user_message = ChatService.add_user_message(
+            db=db,
+            session_id=session.id,
+            user_id=current_user.id,
+            media_url=tmp_path,  # Store temp path for now
+            content_type=f"video/{file_ext[1:]}"  # Remove the dot
+        )
+        user_message_id = user_message.id
+
         if confidence > 0.5:
             predicted_label = label_encoder.inverse_transform([predicted_idx])[0]
             predicted_word = word_mapping.get(predicted_label, predicted_label)
             words_list.append({"word": predicted_word, "confidence": confidence})
-            
-            # 문장 생성 로직: 단어가 2개 이상일 때만 문장 생성
-            if len(words_list) >= 2:
-                sentence_text = generate_emergency_sentence([w['word'] for w in words_list])
+
+            # Generate response message
+            if confidence > 0.8:
+                message = f'"{predicted_word}"라는 수화를 인식했습니다. (신뢰도: {confidence:.2f})'
             else:
-                message = "예측된 단어가 충분하지 않아 문장을 생성할 수 없습니다."
-            
-            # Save chat record to database
-            chat_record = ChatRecord(
-                user_id=user_id,
-                session_id=session_id,
-                predicted_word=predicted_word,
-                confidence=confidence,
-                generated_sentence=sentence_text,
-                input_type="video",
-                frame_count=len(frames)
+                message = f'"{predicted_word}"로 추정됩니다. (신뢰도: {confidence:.2f})'
+
+            # For now, simple sentence - can be enhanced later
+            sentence_text = f"{predicted_word}라고 말씀하시는 것 같습니다."
+
+            # Add assistant message to chat
+            assistant_message = ChatService.add_assistant_message(
+                db=db,
+                session_id=session.id,
+                user_id=current_user.id,
+                message_text=message
             )
-            db.add(chat_record)
-            db.commit()
-            db.refresh(chat_record)
-            
-            # Update video record with chat record link
-            video_record.chat_record_id = chat_record.id
+            assistant_message_id = assistant_message.id
+
+            # Update video record
             video_record.is_processed = True
             db.commit()
         else:
-            message = "Prediction failed with low confidence."
+            message = "수화를 명확히 인식하지 못했습니다. 다시 시도해 주세요."
+
+            # Add assistant message even for failed predictions
+            assistant_message = ChatService.add_assistant_message(
+                db=db,
+                session_id=session.id,
+                user_id=current_user.id,
+                message_text=message
+            )
+            assistant_message_id = assistant_message.id
+
             # Still mark video as processed
             video_record.is_processed = True
             db.commit()
-        
+
         return PredictionResponse(
             words=words_list,
             sentence=sentence_text,
-            message=message
+            message=message,
+            session_id=session.id,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id
         )
         
     except HTTPException:
@@ -602,8 +820,8 @@ async def predict_video(
 @app.post("/predict_sequence", response_model=PredictionResponse)
 async def predict_sequence(
     request: PredictionRequest,
-    user_id: Optional[str] = None,
-    session_id: Optional[str] = None,
+    current_user: User = Depends(get_authenticated_user),
+    session_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -669,8 +887,8 @@ async def predict_sequence(
         
         # Save chat record to database
         chat_record = ChatRecord(
-            user_id=user_id,
-            session_id=session_id,
+            user_id=str(current_user.id),
+            session_id=str(session_id) if session_id else None,
             predicted_word=predicted_word,
             confidence=confidence,
             generated_sentence=sentence_text,
@@ -690,78 +908,81 @@ async def predict_sequence(
     )
 
 # --- Database Query Endpoints ---
-@app.get("/chat-records")
-async def get_chat_records(
-    user_id: Optional[str] = None,
-    session_id: Optional[str] = None,
+@app.get("/chat-sessions")
+async def get_chat_sessions(
+    current_user: User = Depends(get_authenticated_user),
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db)
 ):
-    """Get chat records with optional filtering"""
-    query = db.query(ChatRecord)
-    
-    if user_id:
-        query = query.filter(ChatRecord.user_id == user_id)
-    if session_id:
-        query = query.filter(ChatRecord.session_id == session_id)
-    
-    records = query.order_by(ChatRecord.created_at.desc()).offset(offset).limit(limit).all()
-    
+    """Get chat sessions for the authenticated user with message count"""
+    query = db.query(
+        ChatSession,
+        func.count(ChatMessage.id).label('message_count')
+    ).outerjoin(
+        ChatMessage, ChatSession.id == ChatMessage.session_id
+    ).filter(
+        ChatSession.user_id == current_user.id
+    ).group_by(ChatSession.id)
+
+    sessions = query.order_by(ChatSession.created_at.desc()).offset(offset).limit(limit).all()
+
     return {
-        "records": [
+        "sessions": [
             {
-                "id": record.id,
-                "user_id": record.user_id,
-                "session_id": record.session_id,
-                "predicted_word": record.predicted_word,
-                "confidence": record.confidence,
-                "generated_sentence": record.generated_sentence,
-                "input_type": record.input_type,
-                "frame_count": record.frame_count,
-                "created_at": record.created_at,
-                "updated_at": record.updated_at
-            } for record in records
+                "id": session.ChatSession.id,
+                "user_id": session.ChatSession.user_id,
+                "session_title": session.ChatSession.session_title,
+                "created_at": session.ChatSession.created_at,
+                "message_count": session.message_count
+            } for session in sessions
         ],
-        "total": query.count()
+        "total": db.query(ChatSession).filter(
+            ChatSession.user_id == current_user.id
+        ).count()
     }
 
-@app.get("/video-records")
-async def get_video_records(
-    user_id: Optional[str] = None,
-    session_id: Optional[str] = None,
-    limit: int = 50,
+@app.get("/chat-sessions/{session_id}/messages")
+async def get_session_messages(
+    session_id: int,
+    current_user: User = Depends(get_authenticated_user),
+    limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db)
 ):
-    """Get video records with optional filtering"""
-    query = db.query(VideoRecord)
-    
-    if user_id:
-        query = query.filter(VideoRecord.user_id == user_id)
-    if session_id:
-        query = query.filter(VideoRecord.session_id == session_id)
-    
-    records = query.order_by(VideoRecord.created_at.desc()).offset(offset).limit(limit).all()
-    
+    """Get all messages for a specific chat session (only if user owns the session)"""
+    session = db.query(ChatSession).filter(
+        ChatSession.id == session_id,
+        ChatSession.user_id == current_user.id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or access denied")
+
+    messages = db.query(ChatMessage).filter(
+        ChatMessage.session_id == session_id
+    ).order_by(ChatMessage.message_order.desc()).offset(offset).limit(limit).all()
+
     return {
-        "records": [
+        "session": {
+            "id": session.id,
+            "user_id": session.user_id,
+            "session_title": session.session_title,
+            "created_at": session.created_at
+        },
+        "messages": [
             {
-                "id": record.id,
-                "user_id": record.user_id,
-                "session_id": record.session_id,
-                "filename": record.filename,
-                "file_size": record.file_size,
-                "file_extension": record.file_extension,
-                "duration": record.duration,
-                "frame_count": record.frame_count,
-                "is_processed": record.is_processed,
-                "chat_record_id": record.chat_record_id,
-                "created_at": record.created_at,
-                "updated_at": record.updated_at
-            } for record in records
+                "id": msg.id,
+                "role": msg.role,
+                "message_text": msg.message_text,
+                "media_url": msg.media_url,
+                "content_type": msg.content_type,
+                "created_at": msg.created_at,
+                "message_order": msg.message_order
+            } for msg in messages
         ],
-        "total": query.count()
+        "total": db.query(ChatMessage).filter(
+            ChatMessage.session_id == session_id
+        ).count()
     }
 
 @app.get("/")
