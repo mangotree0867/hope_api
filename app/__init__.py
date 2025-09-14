@@ -1,0 +1,1 @@
+# Hope API - Sign Language Recognition Application
