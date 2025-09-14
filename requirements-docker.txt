@@ -1,0 +1,35 @@
+# Web framework - simplified versions
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+
+# Database
+sqlalchemy>=2.0.0
+psycopg2-binary
+
+# Authentication & Security
+passlib[bcrypt]
+python-jose[cryptography]
+python-multipart
+
+# Data validation
+pydantic>=2.0.0
+email-validator
+
+# Machine Learning & Computer Vision - use latest compatible versions
+torch
+torchvision
+opencv-python-headless
+mediapipe
+numpy
+pandas
+scikit-learn
+
+# AI/ML APIs
+google-generativeai
+
+# Environment & Configuration
+python-dotenv
+
+# Utilities
+Pillow
+requests
