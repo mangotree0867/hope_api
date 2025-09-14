@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Float, DateTime, Boolean
+from sqlalchemy import Column, Integer, String, Text, Float, DateTime, Boolean, Sequence
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 from sqlalchemy.orm import Session
@@ -33,7 +33,12 @@ class ChatMessage(Base):
     message_text = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    message_order = Column(Integer, nullable=False)
+    message_order = Column(
+        Integer,
+        Sequence("chat_messages_message_order_seq"),  # matches your DB sequence name
+        primary_key=False,
+        autoincrement=True
+    )
 
 # VideoRecord 클래스 제거 - chat_messages 테이블에 media_url로 저장됨
 

@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 
     -- Ensure proper message ordering
-    message_order SERIAL                                -- Ensures messages stay in order
+    message_order SERIAL NOT NULL                       -- Ensures messages stay in order
 );
 
 -- Create indexes for performance

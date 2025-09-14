@@ -43,8 +43,17 @@ def log_debug(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_message = f"[{timestamp}] {message}\n"
     print(log_message.strip())
-    with open("debug_log.txt", "a", encoding="utf-8") as f:
-        f.write(log_message)
+
+    # Create logs directory if it doesn't exist
+    import os
+    os.makedirs("logs", exist_ok=True)
+
+    # Write to log file in logs directory
+    try:
+        with open("logs/debug_log.txt", "a", encoding="utf-8") as f:
+            f.write(log_message)
+    except Exception as e:
+        print(f"Failed to write to log file: {e}")
 
 def calculate_angle(p1, p2, p3):
     v1 = p1 - p2

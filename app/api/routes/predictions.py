@@ -216,6 +216,7 @@ async def predict_video(
     except HTTPException:
         raise
     except Exception as e:
+        print(e)
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
     finally:
         if os.path.exists(tmp_path):
