@@ -1,6 +1,7 @@
 # 웹 프레임워크 - 단순화된 버전
 fastapi>=0.100.0
 uvicorn[standard]>=0.20.0
+python-multipart
 
 # 데이터베이스
 sqlalchemy>=2.0.0
