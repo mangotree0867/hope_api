@@ -31,7 +31,7 @@ COPY app/ ./app/
 COPY models/ ./models/
 COPY labels.csv ./
 COPY SL_Partner_Word_List_01.csv ./
-COPY .env ./
+# DO NOT COPY .env - pass as environment variables at runtime
 
 # 로그를 위한 디렉토리 생성
 RUN mkdir -p /app/logs
