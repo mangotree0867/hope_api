@@ -24,3 +24,6 @@ google-generativeai
 
 # 환경 및 설정
 python-dotenv
+
+# AWS S3 integration
+boto3

@@ -35,38 +35,7 @@ class ChatMessage(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     message_order = Column(Integer, nullable=False)
 
-# 하위 호환성을 위해 이전 ChatRecord 유지 (나중에 제거 가능)
-class ChatRecord(Base):
-    __tablename__ = "chat_records"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, index=True, nullable=True)
-    session_id = Column(String, index=True, nullable=True)
-    predicted_word = Column(String, nullable=False)
-    confidence = Column(Float, nullable=False)
-    generated_sentence = Column(Text, nullable=True)
-    input_type = Column(String, nullable=False)  # "video" 또는 "image_sequence"
-    frame_count = Column(Integer, nullable=True)
-    processing_time = Column(Float, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-
-class VideoRecord(Base):
-    __tablename__ = "video_records"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, index=True, nullable=True)
-    session_id = Column(String, index=True, nullable=True)
-    filename = Column(String, nullable=False)
-    file_size = Column(Integer, nullable=False)
-    file_path = Column(String, nullable=False)  # 저장된 파일 경로
-    file_extension = Column(String, nullable=False)
-    duration = Column(Float, nullable=True)
-    frame_count = Column(Integer, nullable=True)
-    is_processed = Column(Boolean, default=False)
-    chat_record_id = Column(Integer, nullable=True)  # 예측 결과에 대한 링크
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+# VideoRecord 클래스 제거 - chat_messages 테이블에 media_url로 저장됨
 
 # --- API용 Pydantic 모델 ---
 class ChatSessionCreate(BaseModel):
@@ -205,4 +174,4 @@ class ChatService:
         """마지막 활동 순서별로 사용자의 모든 세션 가져오기"""
         return db.query(ChatSession).filter(
             ChatSession.user_id == user_id
-        ).order_by(ChatSession.last_activity.desc()).offset(offset).limit(limit).all()
+        ).order_by(ChatSession.created_at.desc()).offset(offset).limit(limit).all()

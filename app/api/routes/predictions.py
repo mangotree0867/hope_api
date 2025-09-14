@@ -13,12 +13,13 @@ from app.core.database import get_db
 from app.core.config import settings
 from app.api.routes.auth import get_authenticated_user
 from app.models.auth import User
-from app.models.chat import ChatSession, ChatService, ChatRecord, VideoRecord
+from app.models.chat import ChatSession, ChatMessage
 from app.schemas.prediction import PredictionRequest, PredictionResponse, VideoPredictionResponse
 from app.services.ml_service import (
     extract_all_features, log_debug, generate_emergency_sentence,
     model, device, label_encoder, word_mapping
 )
+from app.services.s3_service import get_s3_service
 
 router = APIRouter(tags=["Predictions"])
 
@@ -43,9 +44,10 @@ async def predict_video(
             raise HTTPException(status_code=404, detail="Session not found or access denied")
     else:
         # 새로운 세션 생성
+        from datetime import datetime
         session = ChatSession(
             user_id=current_user.id,
-            session_title="New Sign Language Session"
+            session_title=f"{datetime.now().strftime('%Y-%m-%d %H:%M')} 대화"
         )
         db.add(session)
         db.commit()
@@ -63,25 +65,27 @@ async def predict_video(
     # 비디오 파일 읽기
     video_bytes = await file.read()
 
-    # 임시 파일로 저장
+    # S3에 비디오 업로드
+    s3_service = get_s3_service()
+    s3_url = s3_service.upload_video(
+        file_data=video_bytes,
+        user_id=current_user.id,
+        filename=file.filename or f"video{file_ext}"
+    )
+
+    if not s3_url:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to upload video to storage"
+        )
+
+    # 임시 파일로 저장 (OpenCV 처리용)
     with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp_file:
         tmp_file.write(video_bytes)
         tmp_path = tmp_file.name
 
     try:
-        # 비디오 레코드를 데이터베이스에 저장
-        video_record = VideoRecord(
-            user_id=str(current_user.id),
-            session_id=str(session_id) if session_id else None,
-            filename=file.filename or "unknown.mp4",
-            file_size=len(video_bytes),
-            file_path=tmp_path,
-            file_extension=file_ext,
-            is_processed=False
-        )
-        db.add(video_record)
-        db.commit()
-        db.refresh(video_record)
+        # 비디오 파일 정보는 S3 URL로 저장됨
 
         # 비디오에서 모든 프레임 추출
         cap = cv2.VideoCapture(tmp_path)
@@ -101,10 +105,8 @@ async def predict_video(
             frames.append(frame)
         cap.release()
 
-        # 프레임 정보로 비디오 레코드 업데이트
-        video_record.duration = duration
-        video_record.frame_count = len(frames)
-        db.commit()
+        # 프레임 정보 로깅
+        log_debug(f"Video duration: {duration}, frame_count: {len(frames)}")
 
         log_debug(f"Extracted {len(frames)} frames from video")
 
@@ -149,14 +151,17 @@ async def predict_video(
         user_message_id = None
         assistant_message_id = None
 
-        # 채팅에 사용자 메시지 추가 (비디오 업로드)
-        user_message = ChatService.add_user_message(
-            db=db,
+        # 채팅에 사용자 메시지 추가 (비디오 업로드 - S3 URL 저장)
+        user_message = ChatMessage(
             session_id=session.id,
             user_id=current_user.id,
-            media_url=tmp_path,
+            role='user',
+            media_url=s3_url,  # S3 URL 저장
             content_type=f"video/{file_ext[1:]}"
         )
+        db.add(user_message)
+        db.commit()
+        db.refresh(user_message)
         user_message_id = user_message.id
 
         if confidence > 0.5:
@@ -174,32 +179,30 @@ async def predict_video(
             sentence_text = f"{predicted_word}라고 말씀하시는 것 같습니다."
 
             # 채팅에 어시스턴트 메시지 추가
-            assistant_message = ChatService.add_assistant_message(
-                db=db,
+            assistant_message = ChatMessage(
                 session_id=session.id,
                 user_id=current_user.id,
+                role='assistant',
                 message_text=message
             )
-            assistant_message_id = assistant_message.id
-
-            # 비디오 레코드 업데이트
-            video_record.is_processed = True
+            db.add(assistant_message)
             db.commit()
+            db.refresh(assistant_message)
+            assistant_message_id = assistant_message.id
         else:
             message = "수화를 명확히 인식하지 못했습니다. 다시 시도해 주세요."
 
             # 예측 실패 시에도 어시스턴트 메시지 추가
-            assistant_message = ChatService.add_assistant_message(
-                db=db,
+            assistant_message = ChatMessage(
                 session_id=session.id,
                 user_id=current_user.id,
+                role='assistant',
                 message_text=message
             )
-            assistant_message_id = assistant_message.id
-
-            # 여전히 비디오를 처리된 것으로 표시
-            video_record.is_processed = True
+            db.add(assistant_message)
             db.commit()
+            db.refresh(assistant_message)
+            assistant_message_id = assistant_message.id
 
         return PredictionResponse(
             words=words_list,
@@ -287,19 +290,21 @@ async def predict_sequence(
         else:
             message = "예측된 단어가 충분하지 않아 문장을 생성할 수 없습니다."
 
-        # 채팅 레코드를 데이터베이스에 저장
-        chat_record = ChatRecord(
-            user_id=str(current_user.id),
-            session_id=str(session_id) if session_id else None,
-            predicted_word=predicted_word,
-            confidence=confidence,
-            generated_sentence=sentence_text,
-            input_type="image_sequence",
-            frame_count=frame_count
-        )
-        db.add(chat_record)
-        db.commit()
-        db.refresh(chat_record)
+        # 예측 결과를 어시스턴트 메시지로 저장
+        if session_id:
+            session = db.query(ChatSession).filter(
+                ChatSession.id == session_id,
+                ChatSession.user_id == current_user.id
+            ).first()
+            if session:
+                result_message = ChatMessage(
+                    session_id=session.id,
+                    user_id=current_user.id,
+                    role='assistant',
+                    message_text=f"예측 단어: {predicted_word} (신뢰도: {confidence:.2f})\n생성 문장: {sentence_text}"
+                )
+                db.add(result_message)
+                db.commit()
     else:
         message = "Prediction failed with low confidence."
 
