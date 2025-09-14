@@ -15,16 +15,16 @@ from typing import List, Dict, Union, Optional, Tuple
 
 from app.core.config import settings
 
-# Suppress warnings
+# 경고 메시지 억제
 warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.symbol_database")
 warnings.filterwarnings("ignore", message=".*SymbolDatabase.GetPrototype.*")
 warnings.filterwarnings("ignore", message="A column-vector y was passed when a 1d array was expected")
 
-# Configure Gemini API
+# Gemini API 설정
 genai.configure(api_key=settings.GOOGLE_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
-# Initialize MediaPipe
+# MediaPipe 초기화
 mp_pose = mp.solutions.pose
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
@@ -239,7 +239,7 @@ def generate_emergency_sentence(words):
         return " ".join(words) + " 도와주세요."
 
 class StreamingVideoProcessor:
-    """Process video stream and make predictions on sliding windows of frames"""
+    """비디오 스트림을 처리하고 슬라이딩 윈도우 프레임에서 예측 수행"""
 
     def __init__(self, window_size=30, stride=15):
         self.window_size = window_size
@@ -251,7 +251,7 @@ class StreamingVideoProcessor:
         self.frame_count = 0
 
     async def process_frame(self, frame):
-        """Process a single frame and return prediction if window is ready"""
+        """단일 프레임 처리 및 윈도우가 준비되면 예측 반환"""
         all_features, curr_pose, curr_left, curr_right, _, _ = extract_all_features(
             frame, self.prev_pose, self.prev_left, self.prev_right
         )
@@ -274,7 +274,7 @@ class StreamingVideoProcessor:
         return None
 
     async def _predict_window(self):
-        """Make prediction on current window of frames"""
+        """현재 프레임 윈도우에서 예측 수행"""
         if len(self.frame_buffer) < 10:
             return None
 
@@ -308,7 +308,7 @@ class StreamingVideoProcessor:
 
         return predictions
 
-# Load model and class mapping
+# 모델 및 클래스 매핑 로드
 if not os.path.exists(settings.LABELS_CSV_PATH):
     raise FileNotFoundError(f"Labels CSV file '{settings.LABELS_CSV_PATH}' not found.")
 df = pd.read_csv(settings.LABELS_CSV_PATH)
@@ -321,7 +321,7 @@ if not os.path.exists(settings.WORD_LIST_CSV_PATH):
 word_df = pd.read_csv(settings.WORD_LIST_CSV_PATH)
 word_mapping = dict(zip(word_df['number'], word_df['word']))
 
-# Load the model
+# 모델 로드
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = SignLanguageModel(input_size=settings.NUM_FEATURES, num_classes=NUM_CLASSES).to(device)
 if not os.path.exists(settings.MODEL_PATH):

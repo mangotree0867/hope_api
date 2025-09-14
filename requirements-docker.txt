@@ -1,21 +1,21 @@
-# Web framework - simplified versions
+# 웹 프레임워크 - 단순화된 버전
 fastapi>=0.100.0
 uvicorn[standard]>=0.20.0
 
-# Database
+# 데이터베이스
 sqlalchemy>=2.0.0
 psycopg2-binary
 
-# Authentication & Security
+# 인증 및 보안
 passlib[bcrypt]
 python-jose[cryptography]
 python-multipart
 
-# Data validation
+# 데이터 유효성 검사
 pydantic>=2.0.0
 email-validator
 
-# Machine Learning & Computer Vision - use latest compatible versions
+# 머신러닝 및 컴퓨터 비전 - 최신 호환 가능 버전 사용
 torch
 torchvision
 opencv-python-headless
@@ -24,12 +24,12 @@ numpy
 pandas
 scikit-learn
 
-# AI/ML APIs
+# AI/ML API
 google-generativeai
 
-# Environment & Configuration
+# 환경 및 설정
 python-dotenv
 
-# Utilities
+# 유틸리티
 Pillow
 requests

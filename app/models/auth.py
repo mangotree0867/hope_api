@@ -73,15 +73,15 @@ class AuthService:
 
     @staticmethod
     def create_access_token(user_id: int, login_id: str) -> str:
-        """Generate a simple random token (no expiration)"""
-        # Create a secure random token using user info and timestamp
+        """간단한 랜덤 토큰 생성 (만료 없음)"""
+        # 사용자 정보와 타임스탬프를 사용하여 보안 랜덤 토큰 생성
         token_data = f"{user_id}:{login_id}:{datetime.utcnow().isoformat()}:{secrets.token_urlsafe(32)}"
         return hashlib.sha256(token_data.encode()).hexdigest()
 
     @staticmethod
     def verify_token(token: str, db: Session) -> dict:
-        """Verify token by checking if it exists in user_sessions table"""
-        # Find the session with this token
+        """user_sessions 테이블에 토큰이 존재하는지 확인하여 토큰 검증"""
+        # 이 토큰으로 세션 찾기
         session = db.query(UserSession).filter(
             UserSession.session_token == token,
             UserSession.is_valid == True
@@ -93,7 +93,7 @@ class AuthService:
                 detail="Invalid or expired token"
             )
 
-        # Get user info
+        # 사용자 정보 가져오기
         user = db.query(User).filter(User.id == session.user_id).first()
         if not user:
             raise HTTPException(
@@ -107,7 +107,7 @@ class AuthService:
         }
 
 class TokenManager:
-    """Token manager that checks session validity in database"""
+    """데이터베이스에서 세션 유효성을 확인하는 토큰 매니저"""
 
     def __init__(self):
         self.http_bearer = HTTPBearer()
@@ -135,7 +135,7 @@ class TokenManager:
                 detail="Database session not provided"
             )
 
-        # Verify token using database
+        # 데이터베이스를 사용하여 토큰 검증
         payload = AuthService.verify_token(credentials.credentials, db)
         return payload
 
@@ -146,8 +146,8 @@ def get_current_user_dependency(token_payload: dict = Depends(token_manager)) ->
 
 class CurrentUserDependency:
     """
-    Dependency class to get the current authenticated user.
-    This avoids circular imports by accepting db as a parameter.
+    현재 인증된 사용자를 가져오는 의존성 클래스.
+    db를 매개변수로 받아 순환 임포트를 방지합니다.
     """
     def __init__(self):
         self.token_manager = token_manager
@@ -181,5 +181,5 @@ class CurrentUserDependency:
 
         return user
 
-# Create instance that can be imported
+# 임포트할 수 있는 인스턴스 생성
 get_current_user = CurrentUserDependency()

@@ -30,10 +30,10 @@ async def predict_video(
     db: Session = Depends(get_db)
 ):
     """
-    Process video file and manage chat session.
-    Creates new session if none provided, adds user message and assistant response.
+    비디오 파일을 처리하고 채팅 세션을 관리합니다.
+    세션이 제공되지 않은 경우 새 세션을 생성하고, 사용자 메시지와 어시스턴트 응답을 추가합니다.
     """
-    # Get or create session
+    # 세션 가져오기 또는 생성
     if session_id:
         session = db.query(ChatSession).filter(
             ChatSession.id == session_id,
@@ -42,7 +42,7 @@ async def predict_video(
         if not session:
             raise HTTPException(status_code=404, detail="Session not found or access denied")
     else:
-        # Create new session
+        # 새로운 세션 생성
         session = ChatSession(
             user_id=current_user.id,
             session_title="New Sign Language Session"
@@ -51,7 +51,7 @@ async def predict_video(
         db.commit()
         db.refresh(session)
 
-    # Validate file type
+    # 파일 형식 검증
     allowed_extensions = ['.mp4', '.avi', '.mov', '.webm', '.mkv']
     file_ext = os.path.splitext(file.filename)[1].lower() if file.filename else '.mp4'
     if file_ext not in allowed_extensions:
@@ -60,16 +60,16 @@ async def predict_video(
             detail=f"Invalid file type. Allowed types: {', '.join(allowed_extensions)}"
         )
 
-    # Read video file
+    # 비디오 파일 읽기
     video_bytes = await file.read()
 
-    # Save to temp file
+    # 임시 파일로 저장
     with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp_file:
         tmp_file.write(video_bytes)
         tmp_path = tmp_file.name
 
     try:
-        # Save video record to database
+        # 비디오 레코드를 데이터베이스에 저장
         video_record = VideoRecord(
             user_id=str(current_user.id),
             session_id=str(session_id) if session_id else None,
@@ -83,12 +83,12 @@ async def predict_video(
         db.commit()
         db.refresh(video_record)
 
-        # Extract all frames from video
+        # 비디오에서 모든 프레임 추출
         cap = cv2.VideoCapture(tmp_path)
         if not cap.isOpened():
             raise HTTPException(status_code=400, detail="Could not open video file")
 
-        # Get video properties
+        # 비디오 속성 가져오기
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         duration = total_frames / fps if fps > 0 else None
@@ -101,14 +101,14 @@ async def predict_video(
             frames.append(frame)
         cap.release()
 
-        # Update video record with frame info
+        # 프레임 정보로 비디오 레코드 업데이트
         video_record.duration = duration
         video_record.frame_count = len(frames)
         db.commit()
 
         log_debug(f"Extracted {len(frames)} frames from video")
 
-        # Extract features from all frames
+        # 모든 프레임에서 특징 추출
         sequence_buffer = []
         prev_pose, prev_left, prev_right = None, None, None
 
@@ -130,7 +130,7 @@ async def predict_video(
                 session_id=session.id
             )
 
-        # Process sequence
+        # 시퀀스 처리
         sequence_list = list(sequence_buffer)
         sequence_tensor = torch.stack([torch.tensor(s, dtype=torch.float32) for s in sequence_list])
         sequence_tensor = F.pad(sequence_tensor, (0, 0, 0, settings.MAX_SEQ_LENGTH - sequence_tensor.size(0)), 'constant', 0)
@@ -149,7 +149,7 @@ async def predict_video(
         user_message_id = None
         assistant_message_id = None
 
-        # Add user message to chat (video uploaded)
+        # 채팅에 사용자 메시지 추가 (비디오 업로드)
         user_message = ChatService.add_user_message(
             db=db,
             session_id=session.id,
@@ -164,16 +164,16 @@ async def predict_video(
             predicted_word = word_mapping.get(predicted_label, predicted_label)
             words_list.append({"word": predicted_word, "confidence": confidence})
 
-            # Generate response message
+            # 응답 메시지 생성
             if confidence > 0.8:
                 message = f'"{predicted_word}"라는 수화를 인식했습니다. (신뢰도: {confidence:.2f})'
             else:
                 message = f'"{predicted_word}"로 추정됩니다. (신뢰도: {confidence:.2f})'
 
-            # For now, simple sentence
+            # 현재는 간단한 문장
             sentence_text = f"{predicted_word}라고 말씀하시는 것 같습니다."
 
-            # Add assistant message to chat
+            # 채팅에 어시스턴트 메시지 추가
             assistant_message = ChatService.add_assistant_message(
                 db=db,
                 session_id=session.id,
@@ -182,13 +182,13 @@ async def predict_video(
             )
             assistant_message_id = assistant_message.id
 
-            # Update video record
+            # 비디오 레코드 업데이트
             video_record.is_processed = True
             db.commit()
         else:
             message = "수화를 명확히 인식하지 못했습니다. 다시 시도해 주세요."
 
-            # Add assistant message even for failed predictions
+            # 예측 실패 시에도 어시스턴트 메시지 추가
             assistant_message = ChatService.add_assistant_message(
                 db=db,
                 session_id=session.id,
@@ -197,7 +197,7 @@ async def predict_video(
             )
             assistant_message_id = assistant_message.id
 
-            # Still mark video as processed
+            # 여전히 비디오를 처리된 것으로 표시
             video_record.is_processed = True
             db.commit()
 
@@ -226,8 +226,8 @@ async def predict_sequence(
     db: Session = Depends(get_db)
 ):
     """
-    Predicts a sign language word from a sequence of images and generates an emergency sentence.
-    Input should be a list of Base64 encoded images representing a sequence.
+    이미지 시퀀스에서 수화 단어를 예측하고 응급 때 사용할 문장을 생성합니다.
+    입력은 시퀀스를 나타내는 Base64 인코딩된 이미지 목록이어야 합니다.
     """
     if not request.image_sequence:
         raise HTTPException(status_code=400, detail="Image sequence cannot be empty.")
@@ -281,13 +281,13 @@ async def predict_sequence(
         predicted_word = word_mapping.get(predicted_label, predicted_label)
         words_list.append({"word": predicted_word, "confidence": confidence})
 
-        # Generate sentence if enough words
+        # 충분한 단어가 있으면 문장 생성
         if len(words_list) >= 2:
             sentence_text = generate_emergency_sentence([w['word'] for w in words_list])
         else:
             message = "예측된 단어가 충분하지 않아 문장을 생성할 수 없습니다."
 
-        # Save chat record to database
+        # 채팅 레코드를 데이터베이스에 저장
         chat_record = ChatRecord(
             user_id=str(current_user.id),
             session_id=str(session_id) if session_id else None,

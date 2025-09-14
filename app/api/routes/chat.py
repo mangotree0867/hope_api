@@ -16,7 +16,7 @@ async def get_chat_sessions(
     offset: int = 0,
     db: Session = Depends(get_db)
 ):
-    """Get chat sessions for the authenticated user with message count"""
+    """인증된 사용자의 채팅 세션을 메시지 수와 함께 가져오기"""
     query = db.query(
         ChatSession,
         func.count(ChatMessage.id).label('message_count')
@@ -51,7 +51,7 @@ async def get_session_messages(
     offset: int = 0,
     db: Session = Depends(get_db)
 ):
-    """Get all messages for a specific chat session (only if user owns the session)"""
+    """특정 채팅 세션의 모든 메시지 가져오기 (사용자가 세션을 소유한 경우에만)"""
     session = db.query(ChatSession).filter(
         ChatSession.id == session_id,
         ChatSession.user_id == current_user.id

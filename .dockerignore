@@ -1,8 +1,8 @@
-# Git
+# Git 파일
 .git
 .gitignore
 
-# Python
+# Python 파일
 __pycache__/
 *.py[cod]
 *$py.class
@@ -14,58 +14,58 @@ ENV/
 env.bak/
 venv.bak/
 
-# IDE
+# IDE 파일
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS
+# 운영체제 파일
 .DS_Store
 Thumbs.db
 
-# Logs
+# 로그 파일
 *.log
 debug_log.txt
 logs/
 
-# Documentation
+# 문서 파일
 README.md
 *.md
 
-# Docker
+# Docker 파일
 Dockerfile
 docker-compose*.yml
 .dockerignore
 
-# Development
+# 개발 환경 파일
 .env.example
 .env.local
 .env.development
 
-# Temporary files
+# 임시 파일
 tmp/
 temp/
 *.tmp
 
-# Node modules (if any)
+# Node 모듈 (있는 경우)
 node_modules/
 
-# Cache
+# 캐시 파일
 .cache/
 
-# Test files
+# 테스트 파일
 test*/
 tests/
 *_test.py
 test_*.py
 
-# Build artifacts
+# 빌드 결과물
 build/
 dist/
 *.egg-info/
 
-# Database files (if local)
+# 데이터베이스 파일 (로컬인 경우)
 *.sqlite
 *.db

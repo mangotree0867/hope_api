@@ -8,7 +8,7 @@ from datetime import datetime
 
 Base = declarative_base()
 
-# --- Database Models ---
+# --- 데이터베이스 모델 ---
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
 
@@ -23,19 +23,19 @@ class ChatMessage(Base):
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, index=True, nullable=False)
     user_id = Column(Integer, index=True, nullable=False)
-    role = Column(String(20), nullable=False)  # 'user' or 'assistant'
+    role = Column(String(20), nullable=False)  # 'user' 또는 'assistant'
 
-    # For user messages (video input)
+    # 사용자 메시지 (비디오 입력)
     media_url = Column(Text, nullable=True)
     content_type = Column(String(50), nullable=True)
 
-    # For assistant messages (text response)
+    # 어시스턴트 메시지 (텍스트 응답)
     message_text = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     message_order = Column(Integer, nullable=False)
 
-# Keep old ChatRecord for backward compatibility (can be removed later)
+# 하위 호환성을 위해 이전 ChatRecord 유지 (나중에 제거 가능)
 class ChatRecord(Base):
     __tablename__ = "chat_records"
 
@@ -45,7 +45,7 @@ class ChatRecord(Base):
     predicted_word = Column(String, nullable=False)
     confidence = Column(Float, nullable=False)
     generated_sentence = Column(Text, nullable=True)
-    input_type = Column(String, nullable=False)  # "video" or "image_sequence"
+    input_type = Column(String, nullable=False)  # "video" 또는 "image_sequence"
     frame_count = Column(Integer, nullable=True)
     processing_time = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -59,16 +59,16 @@ class VideoRecord(Base):
     session_id = Column(String, index=True, nullable=True)
     filename = Column(String, nullable=False)
     file_size = Column(Integer, nullable=False)
-    file_path = Column(String, nullable=False)  # Path to stored file
+    file_path = Column(String, nullable=False)  # 저장된 파일 경로
     file_extension = Column(String, nullable=False)
     duration = Column(Float, nullable=True)
     frame_count = Column(Integer, nullable=True)
     is_processed = Column(Boolean, default=False)
-    chat_record_id = Column(Integer, nullable=True)  # Link to prediction result
+    chat_record_id = Column(Integer, nullable=True)  # 예측 결과에 대한 링크
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-# --- Pydantic Models for API ---
+# --- API용 Pydantic 모델 ---
 class ChatSessionCreate(BaseModel):
     session_title: Optional[str] = None
 
@@ -103,11 +103,11 @@ class ChatMessageResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# --- Chat Service Functions ---
+# --- 채팅 서비스 기능 ---
 class ChatService:
     @staticmethod
     def create_session(db: Session, user_id: int, title: Optional[str] = None) -> ChatSession:
-        """Create a new chat session for a user"""
+        """사용자를 위한 새로운 채팅 세션 생성"""
         session = ChatSession(
             user_id=user_id,
             session_title=title
@@ -119,7 +119,7 @@ class ChatService:
 
     @staticmethod
     def get_or_create_session(db: Session, user_id: int, session_id: Optional[int] = None) -> ChatSession:
-        """Get existing session or create a new one"""
+        """기존 세션을 가져오거나 새로운 세션 생성"""
         if session_id:
             session = db.query(ChatSession).filter(
                 ChatSession.id == session_id,
@@ -128,7 +128,7 @@ class ChatService:
             if session:
                 return session
 
-        # Create new session if not found or no ID provided
+        # 세션을 찾을 수 없거나 ID가 제공되지 않은 경우 새 세션 생성
         return ChatService.create_session(db, user_id, "New Session")
 
     @staticmethod
@@ -139,8 +139,8 @@ class ChatService:
         media_url: str,
         content_type: str = "video/mp4"
     ) -> ChatMessage:
-        """Add a user video message to the chat"""
-        # Get the next message order
+        """채팅에 사용자 비디오 메시지 추가"""
+        # 다음 메시지 순서 가져오기
         max_order = db.query(func.max(ChatMessage.message_order)).filter(
             ChatMessage.session_id == session_id
         ).scalar() or 0
@@ -165,8 +165,8 @@ class ChatService:
         user_id: int,
         message_text: str
     ) -> ChatMessage:
-        """Add an assistant text response to the chat"""
-        # Get the next message order
+        """채팅에 어시스턴트 텍스트 응답 추가"""
+        # 다음 메시지 순서 가져오기
         max_order = db.query(func.max(ChatMessage.message_order)).filter(
             ChatMessage.session_id == session_id
         ).scalar() or 0
@@ -190,7 +190,7 @@ class ChatService:
         limit: int = 100,
         offset: int = 0
     ) -> List[ChatMessage]:
-        """Get messages for a session ordered by message_order"""
+        """메시지 순서별로 세션의 메시지 가져오기"""
         return db.query(ChatMessage).filter(
             ChatMessage.session_id == session_id
         ).order_by(ChatMessage.message_order.asc()).offset(offset).limit(limit).all()
@@ -202,7 +202,7 @@ class ChatService:
         limit: int = 50,
         offset: int = 0
     ) -> List[ChatSession]:
-        """Get all sessions for a user ordered by last activity"""
+        """마지막 활동 순서별로 사용자의 모든 세션 가져오기"""
         return db.query(ChatSession).filter(
             ChatSession.user_id == user_id
         ).order_by(ChatSession.last_activity.desc()).offset(offset).limit(limit).all()

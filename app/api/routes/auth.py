@@ -15,8 +15,8 @@ def get_authenticated_user(
     db: Session = Depends(get_db)
 ) -> User:
     """
-    Dependency to get the current authenticated user.
-    Use this in any endpoint that requires authentication.
+    현재 인증된 사용자를 가져오는 의존성.
+    인증이 필요한 모든 엔드포인트에서 사용하세요.
     """
     if not credentials or credentials.scheme != "Bearer":
         raise HTTPException(
@@ -24,7 +24,7 @@ def get_authenticated_user(
             detail="Invalid authentication scheme"
         )
 
-    # Verify token and get user info
+    # 토큰 검증 및 사용자 정보 가져오기
     token_payload = AuthService.verify_token(credentials.credentials, db)
     user_id = token_payload.get("user_id")
 
@@ -43,9 +43,9 @@ async def register(
     db: Session = Depends(get_db)
 ):
     """
-    Register a new user and return an access token
+    새로운 사용자를 등록하고 액세스 토큰을 반환
     """
-    # Check if user already exists
+    # 사용자가 이미 존재하는지 확인
     existing_user = db.query(User).filter(User.login_id == user_data.login_id).first()
     if existing_user:
         raise HTTPException(
@@ -53,7 +53,7 @@ async def register(
             detail="User with this login_id already exists"
         )
 
-    # Check if email already exists
+    # 이메일이 이미 존재하는지 확인
     existing_email = db.query(User).filter(User.email == user_data.email).first()
     if existing_email:
         raise HTTPException(
@@ -61,7 +61,7 @@ async def register(
             detail="User with this email already exists"
         )
 
-    # Create new user
+    # 새로운 사용자 생성
     salt = AuthService.generate_salt()
     password_hash = AuthService.hash_password(user_data.password, salt)
 
@@ -77,10 +77,10 @@ async def register(
     db.commit()
     db.refresh(new_user)
 
-    # Generate access token
+    # 액세스 토큰 생성
     access_token = AuthService.create_access_token(new_user.id, new_user.login_id)
 
-    # Create session
+    # 세션 생성
     session = UserSession(
         user_id=new_user.id,
         session_token=access_token
@@ -107,9 +107,9 @@ async def login(
     db: Session = Depends(get_db)
 ):
     """
-    Login user and return an access token
+    사용자 로그인 및 액세스 토큰 반환
     """
-    # Find user by login_id
+    # login_id로 사용자 찾기
     user = db.query(User).filter(User.login_id == credentials.login_id).first()
 
     if not user:
@@ -118,28 +118,28 @@ async def login(
             detail="Invalid login credentials"
         )
 
-    # Verify password
+    # 비밀번호 검증
     if not AuthService.verify_password(credentials.password, user.salt, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid login credentials"
         )
 
-    # Generate access token
+    # 액세스 토큰 생성
     access_token = AuthService.create_access_token(user.id, user.login_id)
 
-    # Create or update session
+    # 세션 생성 또는 업데이트
     existing_session = db.query(UserSession).filter(
         UserSession.user_id == user.id,
         UserSession.is_valid == True
     ).first()
 
     if existing_session:
-        # Invalidate old session
+        # 이전 세션 무효화
         existing_session.is_valid = False
         db.commit()
 
-    # Create new session
+    # 새로운 세션 생성
     new_session = UserSession(
         user_id=user.id,
         session_token=access_token
@@ -166,7 +166,7 @@ async def logout(
     db: Session = Depends(get_db)
 ):
     """
-    Logout user by invalidating their session
+    세션을 무효화하여 사용자 로그아웃
     """
     if not credentials or credentials.scheme != "Bearer":
         raise HTTPException(
@@ -174,7 +174,7 @@ async def logout(
             detail="Invalid authentication scheme"
         )
 
-    # Find and invalidate the specific session token
+    # 특정 세션 토큰 찾기 및 무효화
     session = db.query(UserSession).filter(
         UserSession.session_token == credentials.credentials,
         UserSession.is_valid == True
@@ -191,7 +191,7 @@ async def get_current_user_info(
     current_user: User = Depends(get_authenticated_user)
 ):
     """
-    Get current authenticated user info
+    현재 인증된 사용자 정보 가져오기
     """
     return UserResponse(
         id=current_user.id,
