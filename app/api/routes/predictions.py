@@ -6,7 +6,7 @@ import tempfile
 import torch
 import torch.nn.functional as F
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -15,6 +15,7 @@ from app.api.routes.auth import get_authenticated_user
 from app.models.auth import User
 from app.models.chat import ChatSession, ChatMessage
 from app.schemas.prediction import PredictionRequest, PredictionResponse, VideoPredictionResponse
+from app.schemas.auth import ErrorResponse
 from app.services.ml_service import (
     extract_all_features, log_debug, generate_emergency_sentence,
     model, device, label_encoder, word_mapping
@@ -23,16 +24,32 @@ from app.services.s3_service import get_s3_service
 
 router = APIRouter(tags=["Predictions"])
 
-@router.post("/predict-video", response_model=PredictionResponse)
+@router.post("/predict-video",
+    response_model=PredictionResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid file type or video processing error"},
+        401: {"model": ErrorResponse, "description": "Invalid authentication credentials"},
+        404: {"model": ErrorResponse, "description": "Session not found or access denied"},
+        500: {"model": ErrorResponse, "description": "Video processing or storage error"}
+    }
+)
 async def predict_video(
-    file: UploadFile = File(..., description="Video file to process"),
+    file: UploadFile = File(..., description="Video file to process (.mp4, .avi, .mov, .webm, .mkv)"),
     current_user: User = Depends(get_authenticated_user),
-    session_id: Optional[int] = None,
+    session_id: Optional[int] = Query(None, description="Existing chat session ID (optional, creates new session if not provided)"),
     db: Session = Depends(get_db)
 ):
     """
-    비디오 파일을 처리하고 채팅 세션을 관리합니다.
-    세션이 제공되지 않은 경우 새 세션을 생성하고, 사용자 메시지와 어시스턴트 응답을 추가합니다.
+    비디오 파일을 처리하여 수화 예측을 수행하고 채팅 세션에 결과를 저장합니다.
+
+    **처리 과정:**
+    1. 비디오 파일 업로드 및 S3 저장
+    2. 프레임 추출 및 특징 분석
+    3. ML 모델을 통한 수화 예측
+    4. 채팅 세션에 사용자 메시지(비디오) 및 어시스턴트 응답 추가
+
+    **지원 형식:** .mp4, .avi, .mov, .webm, .mkv
+    **최소 요구사항:** 10프레임 이상
     """
     # 세션 가져오기 또는 생성
     if session_id:
@@ -222,16 +239,32 @@ async def predict_video(
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-@router.post("/predict_sequence", response_model=PredictionResponse)
+@router.post("/predict_sequence",
+    response_model=PredictionResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "Empty image sequence or invalid image data"},
+        401: {"model": ErrorResponse, "description": "Invalid authentication credentials"},
+        500: {"model": ErrorResponse, "description": "Prediction processing error"}
+    }
+)
 async def predict_sequence(
     request: PredictionRequest,
     current_user: User = Depends(get_authenticated_user),
-    session_id: Optional[int] = None,
+    session_id: Optional[int] = Query(None, description="Existing chat session ID (optional)"),
     db: Session = Depends(get_db)
 ):
     """
-    이미지 시퀀스에서 수화 단어를 예측하고 응급 때 사용할 문장을 생성합니다.
-    입력은 시퀀스를 나타내는 Base64 인코딩된 이미지 목록이어야 합니다.
+    Base64 인코딩된 이미지 시퀀스에서 수화 단어를 예측하고 응급 상황용 문장을 생성합니다.
+
+    **처리 과정:**
+    1. Base64 이미지 디코딩 및 검증
+    2. 각 프레임에서 특징 추출
+    3. ML 모델을 통한 수화 단어 예측
+    4. 예측 결과를 바탕으로 상황별 문장 생성
+
+    **요구사항:**
+    - **image_sequence**: Base64 인코딩된 이미지 목록 (10개 이상 권장)
+    - **session_id**: 채팅 세션 ID (선택사항)
     """
     if not request.image_sequence:
         raise HTTPException(status_code=400, detail="Image sequence cannot be empty.")
@@ -285,9 +318,14 @@ async def predict_sequence(
         predicted_word = word_mapping.get(predicted_label, predicted_label)
         words_list.append({"word": predicted_word, "confidence": confidence})
 
-        # 충분한 단어가 있으면 문장 생성
-        if len(words_list) >= 2:
-            sentence_text = generate_emergency_sentence([w['word'] for w in words_list])
+        # 문장 생성 로직 (단어가 하나라도 있으면 시도)
+        if len(words_list) >= 1:
+            try:
+                sentence_text = generate_emergency_sentence([w['word'] for w in words_list])
+                message = f'예측된 단어: "{predicted_word}" (신뢰도: {confidence:.2f})'
+            except Exception as e:
+                sentence_text = predicted_word
+                message = f'예측된 단어: "{predicted_word}" (신뢰도: {confidence:.2f}), 문장 생성 실패'
         else:
             message = "예측된 단어가 충분하지 않아 문장을 생성할 수 없습니다."
 

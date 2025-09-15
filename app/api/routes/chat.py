@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 
@@ -6,17 +6,30 @@ from app.core.database import get_db
 from app.api.routes.auth import get_authenticated_user
 from app.models.auth import User
 from app.models.chat import ChatSession, ChatMessage
+from app.schemas.chat import ChatSessionsListResponse, SessionMessagesResponse
+from app.schemas.auth import ErrorResponse
 
 router = APIRouter(tags=["Chat"])
 
-@router.get("/chat-sessions")
+@router.get("/chat-sessions",
+    response_model=ChatSessionsListResponse,
+    responses={
+        401: {"model": ErrorResponse, "description": "Invalid authentication credentials"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
 async def get_chat_sessions(
     current_user: User = Depends(get_authenticated_user),
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, description="Number of sessions to retrieve (max 100)", ge=1, le=100),
+    offset: int = Query(0, description="Number of sessions to skip", ge=0),
     db: Session = Depends(get_db)
 ):
-    """인증된 사용자의 채팅 세션을 메시지 수와 함께 가져오기"""
+    """
+    인증된 사용자의 채팅 세션을 메시지 수와 함께 가져오기
+
+    - **limit**: 가져올 세션 수 (1-100, 기본값 50)
+    - **offset**: 건너뛸 세션 수 (기본값 0)
+    """
     query = db.query(
         ChatSession,
         func.count(ChatMessage.id).label('message_count')
@@ -28,8 +41,8 @@ async def get_chat_sessions(
 
     sessions = query.order_by(ChatSession.created_at.desc()).offset(offset).limit(limit).all()
 
-    return {
-        "sessions": [
+    return ChatSessionsListResponse(
+        sessions=[
             {
                 "id": session.ChatSession.id,
                 "user_id": session.ChatSession.user_id,
@@ -38,20 +51,33 @@ async def get_chat_sessions(
                 "message_count": session.message_count
             } for session in sessions
         ],
-        "total": db.query(ChatSession).filter(
+        total=db.query(ChatSession).filter(
             ChatSession.user_id == current_user.id
         ).count()
-    }
+    )
 
-@router.get("/chat-sessions/{session_id}/messages")
+@router.get("/chat-sessions/{session_id}/messages",
+    response_model=SessionMessagesResponse,
+    responses={
+        401: {"model": ErrorResponse, "description": "Invalid authentication credentials"},
+        404: {"model": ErrorResponse, "description": "Session not found or access denied"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
 async def get_session_messages(
     session_id: int,
     current_user: User = Depends(get_authenticated_user),
-    limit: int = 100,
-    offset: int = 0,
+    limit: int = Query(100, description="Number of messages to retrieve (max 200)", ge=1, le=200),
+    offset: int = Query(0, description="Number of messages to skip", ge=0),
     db: Session = Depends(get_db)
 ):
-    """특정 채팅 세션의 모든 메시지 가져오기 (사용자가 세션을 소유한 경우에만)"""
+    """
+    특정 채팅 세션의 모든 메시지 가져오기 (사용자가 세션을 소유한 경우에만)
+
+    - **session_id**: 채팅 세션 ID
+    - **limit**: 가져올 메시지 수 (1-200, 기본값 100)
+    - **offset**: 건너뛸 메시지 수 (기본값 0)
+    """
     session = db.query(ChatSession).filter(
         ChatSession.id == session_id,
         ChatSession.user_id == current_user.id
@@ -63,14 +89,14 @@ async def get_session_messages(
         ChatMessage.session_id == session_id
     ).order_by(ChatMessage.message_order.desc()).offset(offset).limit(limit).all()
 
-    return {
-        "session": {
+    return SessionMessagesResponse(
+        session={
             "id": session.id,
             "user_id": session.user_id,
             "session_title": session.session_title,
             "created_at": session.created_at
         },
-        "messages": [
+        messages=[
             {
                 "id": msg.id,
                 "role": msg.role,
@@ -81,7 +107,7 @@ async def get_session_messages(
                 "message_order": msg.message_order
             } for msg in messages
         ],
-        "total": db.query(ChatMessage).filter(
+        total=db.query(ChatMessage).filter(
             ChatMessage.session_id == session_id
         ).count()
-    }
+    )

@@ -7,6 +7,7 @@ from app.models.auth import (
     User, UserSession, UserCreate, UserLogin, TokenResponse, UserResponse,
     AuthService
 )
+from app.schemas.auth import LogoutResponse, ErrorResponse
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -37,13 +38,24 @@ def get_authenticated_user(
 
     return user
 
-@router.post("/register", response_model=TokenResponse)
+@router.post("/register",
+    response_model=TokenResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "User already exists or invalid data"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
 async def register(
     user_data: UserCreate,
     db: Session = Depends(get_db)
 ):
     """
     새로운 사용자를 등록하고 액세스 토큰을 반환
+
+    - **name**: 사용자 이름
+    - **login_id**: 고유 로그인 ID
+    - **password**: 비밀번호 (해시화되어 저장됨)
+    - **email**: 이메일 주소
     """
     # 사용자가 이미 존재하는지 확인
     existing_user = db.query(User).filter(User.login_id == user_data.login_id).first()
@@ -101,13 +113,22 @@ async def register(
         user=user_response
     )
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login",
+    response_model=TokenResponse,
+    responses={
+        401: {"model": ErrorResponse, "description": "Invalid login credentials"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
 async def login(
     credentials: UserLogin,
     db: Session = Depends(get_db)
 ):
     """
     사용자 로그인 및 액세스 토큰 반환
+
+    - **login_id**: 등록된 로그인 ID
+    - **password**: 비밀번호
     """
     # login_id로 사용자 찾기
     user = db.query(User).filter(User.login_id == credentials.login_id).first()
@@ -160,13 +181,21 @@ async def login(
         user=user_response
     )
 
-@router.post("/logout")
+@router.post("/logout",
+    response_model=LogoutResponse,
+    responses={
+        401: {"model": ErrorResponse, "description": "Invalid authentication scheme or token"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
 async def logout(
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
     db: Session = Depends(get_db)
 ):
     """
     세션을 무효화하여 사용자 로그아웃
+
+    Bearer 토큰을 Authorization 헤더에 포함하여 요청해야 합니다.
     """
     if not credentials or credentials.scheme != "Bearer":
         raise HTTPException(
@@ -184,14 +213,22 @@ async def logout(
         session.is_valid = False
         db.commit()
 
-    return {"message": "Successfully logged out"}
+    return LogoutResponse(message="Successfully logged out")
 
-@router.get("/me", response_model=UserResponse)
+@router.get("/me",
+    response_model=UserResponse,
+    responses={
+        401: {"model": ErrorResponse, "description": "Invalid authentication credentials"},
+        404: {"model": ErrorResponse, "description": "User not found"}
+    }
+)
 async def get_current_user_info(
     current_user: User = Depends(get_authenticated_user)
 ):
     """
     현재 인증된 사용자 정보 가져오기
+
+    Bearer 토큰을 Authorization 헤더에 포함하여 요청해야 합니다.
     """
     return UserResponse(
         id=current_user.id,
