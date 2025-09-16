@@ -1,42 +1,16 @@
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models.auth import (
-    User, UserSession, UserCreate, UserLogin, TokenResponse, UserResponse,
-    AuthService
-)
+from app.models.auth import User, UserSession, UserCreate, UserLogin, TokenResponse, UserResponse
+from app.services.auth import AuthService, get_authenticated_user, get_optional_user
 from app.schemas.auth import LogoutResponse, ErrorResponse
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-def get_authenticated_user(
-    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
-    db: Session = Depends(get_db)
-) -> User:
-    """
-    현재 인증된 사용자를 가져오는 의존성.
-    인증이 필요한 모든 엔드포인트에서 사용하세요.
-    """
-    if not credentials or credentials.scheme != "Bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication scheme"
-        )
 
-    # 토큰 검증 및 사용자 정보 가져오기
-    token_payload = AuthService.verify_token(credentials.credentials, db)
-    user_id = token_payload.get("user_id")
-
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-
-    return user
 
 @router.post("/register",
     response_model=TokenResponse,

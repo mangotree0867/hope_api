@@ -11,10 +11,10 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.api.routes.auth import get_authenticated_user
 from app.models.auth import User
+from app.services.auth import get_optional_user
 from app.models.chat import ChatSession, ChatMessage
-from app.schemas.prediction import PredictionRequest, PredictionResponse, VideoPredictionResponse
+from app.schemas.prediction import PredictionRequest, PredictionResponse
 from app.schemas.auth import ErrorResponse
 from app.services.ml_service import (
     extract_all_features, log_debug, generate_emergency_sentence,
@@ -24,23 +24,29 @@ from app.services.s3_service import get_s3_service
 
 router = APIRouter(tags=["Predictions"])
 
+# Special user ID for anonymous/unauthenticated users
+ANONYMOUS_USER_ID = 1
+
 @router.post("/predict-video",
     response_model=PredictionResponse,
     responses={
         400: {"model": ErrorResponse, "description": "Invalid file type or video processing error"},
-        401: {"model": ErrorResponse, "description": "Invalid authentication credentials"},
         404: {"model": ErrorResponse, "description": "Session not found or access denied"},
         500: {"model": ErrorResponse, "description": "Video processing or storage error"}
     }
 )
 async def predict_video(
     file: UploadFile = File(..., description="Video file to process (.mp4, .avi, .mov, .webm, .mkv)"),
-    current_user: User = Depends(get_authenticated_user),
+    current_user: Optional[User] = Depends(get_optional_user),
     session_id: Optional[int] = Query(None, description="Existing chat session ID (optional, creates new session if not provided)"),
     db: Session = Depends(get_db)
 ):
     """
     비디오 파일을 처리하여 수화 예측을 수행하고 채팅 세션에 결과를 저장합니다.
+
+    **인증:**
+    - 선택사항: 토큰이 제공되면 사용자와 연결, 없으면 임시 세션 생성
+    - 임시 세션은 로그인하지 않은 사용자도 사용 가능
 
     **처리 과정:**
     1. 비디오 파일 업로드 및 S3 저장
@@ -52,18 +58,22 @@ async def predict_video(
     **최소 요구사항:** 10프레임 이상
     """
     # 세션 가져오기 또는 생성
+    effective_user_id = current_user.id if current_user else ANONYMOUS_USER_ID
+
     if session_id:
+        # 세션 조회 - 사용자 ID와 매칭
         session = db.query(ChatSession).filter(
             ChatSession.id == session_id,
-            ChatSession.user_id == current_user.id
+            ChatSession.user_id == effective_user_id
         ).first()
+
         if not session:
             raise HTTPException(status_code=404, detail="Session not found or access denied")
     else:
         # 새로운 세션 생성
         from datetime import datetime
         session = ChatSession(
-            user_id=current_user.id,
+            user_id=effective_user_id,
             session_title=f"{datetime.now().strftime('%Y-%m-%d %H:%M')} 대화"
         )
         db.add(session)
@@ -86,7 +96,7 @@ async def predict_video(
     s3_service = get_s3_service()
     s3_url = s3_service.upload_video(
         file_data=video_bytes,
-        user_id=current_user.id,
+        user_id=effective_user_id,
         filename=file.filename or f"video{file_ext}"
     )
 
@@ -171,7 +181,7 @@ async def predict_video(
         # 채팅에 사용자 메시지 추가 (비디오 업로드 - S3 URL 저장)
         user_message = ChatMessage(
             session_id=session.id,
-            user_id=current_user.id,
+            user_id=effective_user_id,
             role='user',
             media_url=s3_url,  # S3 URL 저장
             content_type=f"video/{file_ext[1:]}"
@@ -198,7 +208,7 @@ async def predict_video(
             # 채팅에 어시스턴트 메시지 추가
             assistant_message = ChatMessage(
                 session_id=session.id,
-                user_id=current_user.id,
+                user_id=effective_user_id,
                 role='assistant',
                 message_text=message
             )
@@ -212,7 +222,7 @@ async def predict_video(
             # 예측 실패 시에도 어시스턴트 메시지 추가
             assistant_message = ChatMessage(
                 session_id=session.id,
-                user_id=current_user.id,
+                user_id=effective_user_id,
                 role='assistant',
                 message_text=message
             )
@@ -243,29 +253,33 @@ async def predict_video(
     response_model=PredictionResponse,
     responses={
         400: {"model": ErrorResponse, "description": "Empty image sequence or invalid image data"},
-        401: {"model": ErrorResponse, "description": "Invalid authentication credentials"},
         500: {"model": ErrorResponse, "description": "Prediction processing error"}
     }
 )
 async def predict_sequence(
     request: PredictionRequest,
-    current_user: User = Depends(get_authenticated_user),
+    current_user: Optional[User] = Depends(get_optional_user),
     session_id: Optional[int] = Query(None, description="Existing chat session ID (optional)"),
     db: Session = Depends(get_db)
 ):
     """
     Base64 인코딩된 이미지 시퀀스에서 수화 단어를 예측하고 응급 상황용 문장을 생성합니다.
 
+    **인증:**
+    - 선택사항: 토큰이 제공되면 사용자와 연결, 없으면 임시 세션 사용 가능
+
     **처리 과정:**
     1. Base64 이미지 디코딩 및 검증
     2. 각 프레임에서 특징 추출
     3. ML 모델을 통한 수화 단어 예측
-    4. 예측 결과를 바탕으로 상황별 문장 생성
+    4. 예측 결과를 바탁으로 상황별 문장 생성
 
     **요구사항:**
     - **image_sequence**: Base64 인코딩된 이미지 목록 (10개 이상 권장)
     - **session_id**: 채팅 세션 ID (선택사항)
     """
+    effective_user_id = current_user.id if current_user else ANONYMOUS_USER_ID
+
     if not request.image_sequence:
         raise HTTPException(status_code=400, detail="Image sequence cannot be empty.")
 
@@ -331,14 +345,16 @@ async def predict_sequence(
 
         # 예측 결과를 어시스턴트 메시지로 저장
         if session_id:
+            # 세션 조회 - 사용자 ID와 매칭
             session = db.query(ChatSession).filter(
                 ChatSession.id == session_id,
-                ChatSession.user_id == current_user.id
+                ChatSession.user_id == effective_user_id
             ).first()
+
             if session:
                 result_message = ChatMessage(
                     session_id=session.id,
-                    user_id=current_user.id,
+                    user_id=effective_user_id,
                     role='assistant',
                     message_text=f"예측 단어: {predicted_word} (신뢰도: {confidence:.2f})\n생성 문장: {sentence_text}"
                 )
