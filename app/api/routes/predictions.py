@@ -18,7 +18,7 @@ from app.schemas.prediction import PredictionRequest, PredictionResponse
 from app.schemas.auth import ErrorResponse
 from app.services.ml_service import (
     extract_all_features, log_debug, generate_emergency_sentence,
-    model, device, label_encoder, word_mapping
+    model, device, label_encoder, process_and_predict_from_mp4, word_mapping
 )
 from app.services.s3_service import get_s3_service
 
@@ -111,73 +111,10 @@ async def predict_video(
         tmp_file.write(video_bytes)
         tmp_path = tmp_file.name
 
+    user_message_id = None
+    assistant_message_id = None
+
     try:
-        # 비디오 파일 정보는 S3 URL로 저장됨
-
-        # 비디오에서 모든 프레임 추출
-        cap = cv2.VideoCapture(tmp_path)
-        if not cap.isOpened():
-            raise HTTPException(status_code=400, detail="Could not open video file")
-
-        # 비디오 속성 가져오기
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = total_frames / fps if fps > 0 else None
-
-        frames = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frames.append(frame)
-        cap.release()
-
-        # 프레임 정보 로깅
-        log_debug(f"Video duration: {duration}, frame_count: {len(frames)}")
-
-        log_debug(f"Extracted {len(frames)} frames from video")
-
-        # 모든 프레임에서 특징 추출
-        sequence_buffer = []
-        prev_pose, prev_left, prev_right = None, None, None
-
-        for frame in frames:
-            all_features, curr_pose, curr_left, curr_right, _, _ = extract_all_features(
-                frame, prev_pose, prev_left, prev_right
-            )
-            sequence_buffer.append(all_features)
-            prev_pose, prev_left, prev_right = curr_pose, curr_left, curr_right
-
-        log_debug(f"Extracted features from {len(sequence_buffer)} frames")
-
-        frame_count = len(sequence_buffer)
-        if frame_count < 10:
-            return PredictionResponse(
-                words=[],
-                sentence="",
-                message=f"Sequence too short ({frame_count} frames). Minimum 10 frames required.",
-                session_id=session.id
-            )
-
-        # 시퀀스 처리
-        sequence_list = list(sequence_buffer)
-        sequence_tensor = torch.stack([torch.tensor(s, dtype=torch.float32) for s in sequence_list])
-        sequence_tensor = F.pad(sequence_tensor, (0, 0, 0, settings.MAX_SEQ_LENGTH - sequence_tensor.size(0)), 'constant', 0)
-        sequence_tensor = sequence_tensor.unsqueeze(0).to(device)
-
-        with torch.no_grad():
-            outputs = model(sequence_tensor)
-
-        probs = F.softmax(outputs, dim=1)
-        predicted_idx = outputs.argmax(1).item()
-        confidence = probs[0][predicted_idx].item()
-
-        words_list = []
-        sentence_text = ""
-        message = ""
-        user_message_id = None
-        assistant_message_id = None
-
         # 채팅에 사용자 메시지 추가 (비디오 업로드 - S3 URL 저장)
         user_message = ChatMessage(
             session_id=session.id,
@@ -191,49 +128,40 @@ async def predict_video(
         db.refresh(user_message)
         user_message_id = user_message.id
 
-        if confidence > 0.5:
-            predicted_label = label_encoder.inverse_transform([predicted_idx])[0]
-            predicted_word = word_mapping.get(predicted_label, predicted_label)
-            words_list.append({"word": predicted_word, "confidence": confidence})
+        # 비디오에서 모든 프레임 추출 (FAST-API와 동일한 로직)
+        detected_words = await process_and_predict_from_mp4(tmp_path)
 
-            # 응답 메시지 생성
-            if confidence > 0.8:
-                message = f'"{predicted_word}"라는 수화를 인식했습니다. (신뢰도: {confidence:.2f})'
-            else:
-                message = f'"{predicted_word}"로 추정됩니다. (신뢰도: {confidence:.2f})'
-
-            # 현재는 간단한 문장
-            sentence_text = f"{predicted_word}라고 말씀하시는 것 같습니다."
-
-            # 채팅에 어시스턴트 메시지 추가
-            assistant_message = ChatMessage(
-                session_id=session.id,
-                user_id=effective_user_id,
-                role='assistant',
-                message_text=message
-            )
-            db.add(assistant_message)
-            db.commit()
-            db.refresh(assistant_message)
-            assistant_message_id = assistant_message.id
+        # 문장 생성 (FAST-API와 동일)
+        if detected_words and len(detected_words) >= 2:
+            word_list = [word_info["word"] for word_info in detected_words]
+            sentence = generate_emergency_sentence(word_list)
         else:
-            message = "수화를 명확히 인식하지 못했습니다. 다시 시도해 주세요."
+            sentence = "문장 생성을 위해 최소 2개의 단어가 필요합니다."
 
-            # 예측 실패 시에도 어시스턴트 메시지 추가
-            assistant_message = ChatMessage(
-                session_id=session.id,
-                user_id=effective_user_id,
-                role='assistant',
-                message_text=message
-            )
-            db.add(assistant_message)
-            db.commit()
-            db.refresh(assistant_message)
-            assistant_message_id = assistant_message.id
+        log_debug(f"최종 결과: words={detected_words}, sentence={sentence}")
+
+        # 결과를 메시지로 포맷
+        if detected_words:
+            words_str = ", ".join([f"{w['word']} ({w['confidence']:.1%})" for w in detected_words])
+            message = f"감지된 단어: {words_str}\n\n생성된 문장: {sentence}"
+        else:
+            message = "수화를 감지하지 못했습니다. 다시 시도해주세요."
+
+        # 채팅에 어시스턴트 메시지 추가
+        assistant_message = ChatMessage(
+            session_id=session.id,
+            user_id=effective_user_id,
+            role='assistant',
+            message_text=message
+        )
+        db.add(assistant_message)
+        db.commit()
+        db.refresh(assistant_message)
+        assistant_message_id = assistant_message.id
 
         return PredictionResponse(
-            words=words_list,
-            sentence=sentence_text,
+            words=detected_words,
+            sentence=sentence,
             message=message,
             session_id=session.id,
             user_message_id=user_message_id,
@@ -248,124 +176,3 @@ async def predict_video(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-
-@router.post("/predict_sequence",
-    response_model=PredictionResponse,
-    responses={
-        400: {"model": ErrorResponse, "description": "Empty image sequence or invalid image data"},
-        500: {"model": ErrorResponse, "description": "Prediction processing error"}
-    }
-)
-async def predict_sequence(
-    request: PredictionRequest,
-    current_user: Optional[User] = Depends(get_optional_user),
-    session_id: Optional[int] = Query(None, description="Existing chat session ID (optional)"),
-    db: Session = Depends(get_db)
-):
-    """
-    Base64 인코딩된 이미지 시퀀스에서 수화 단어를 예측하고 응급 상황용 문장을 생성합니다.
-
-    **인증:**
-    - 선택사항: 토큰이 제공되면 사용자와 연결, 없으면 임시 세션 사용 가능
-
-    **처리 과정:**
-    1. Base64 이미지 디코딩 및 검증
-    2. 각 프레임에서 특징 추출
-    3. ML 모델을 통한 수화 단어 예측
-    4. 예측 결과를 바탁으로 상황별 문장 생성
-
-    **요구사항:**
-    - **image_sequence**: Base64 인코딩된 이미지 목록 (10개 이상 권장)
-    - **session_id**: 채팅 세션 ID (선택사항)
-    """
-    effective_user_id = current_user.id if current_user else ANONYMOUS_USER_ID
-
-    if not request.image_sequence:
-        raise HTTPException(status_code=400, detail="Image sequence cannot be empty.")
-
-    sequence_buffer = []
-    prev_pose, prev_left, prev_right = None, None, None
-
-    for b64_image in request.image_sequence:
-        try:
-            image_data = base64.b64decode(b64_image)
-            image_np = np.frombuffer(image_data, np.uint8)
-            frame = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
-
-            if frame is None:
-                raise ValueError("Could not decode image from Base64 string.")
-
-            all_features, curr_pose, curr_left, curr_right, _, _ = extract_all_features(frame, prev_pose, prev_left, prev_right)
-            sequence_buffer.append(all_features)
-            prev_pose, prev_left, prev_right = curr_pose, curr_left, curr_right
-
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid image data: {str(e)}")
-
-    frame_count = len(sequence_buffer)
-    if frame_count < 10:
-        return PredictionResponse(
-            words=[],
-            sentence="",
-            message=f"Sequence too short ({frame_count} frames). Minimum 10 frames required.",
-            session_id=session_id if session_id else 0
-        )
-
-    sequence_list = list(sequence_buffer)
-    sequence_tensor = torch.stack([torch.tensor(s, dtype=torch.float32) for s in sequence_list])
-    sequence_tensor = F.pad(sequence_tensor, (0, 0, 0, settings.MAX_SEQ_LENGTH - sequence_tensor.size(0)), 'constant', 0)
-    sequence_tensor = sequence_tensor.unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        outputs = model(sequence_tensor)
-
-    probs = F.softmax(outputs, dim=1)
-    predicted_idx = outputs.argmax(1).item()
-    confidence = probs[0][predicted_idx].item()
-
-    words_list = []
-    sentence_text = ""
-    message = ""
-
-    if confidence > 0.5:
-        predicted_label = label_encoder.inverse_transform([predicted_idx])[0]
-        predicted_word = word_mapping.get(predicted_label, predicted_label)
-        words_list.append({"word": predicted_word, "confidence": confidence})
-
-        # 문장 생성 로직 (단어가 하나라도 있으면 시도)
-        if len(words_list) >= 1:
-            try:
-                sentence_text = generate_emergency_sentence([w['word'] for w in words_list])
-                message = f'예측된 단어: "{predicted_word}" (신뢰도: {confidence:.2f})'
-            except Exception as e:
-                sentence_text = predicted_word
-                message = f'예측된 단어: "{predicted_word}" (신뢰도: {confidence:.2f}), 문장 생성 실패'
-        else:
-            message = "예측된 단어가 충분하지 않아 문장을 생성할 수 없습니다."
-
-        # 예측 결과를 어시스턴트 메시지로 저장
-        if session_id:
-            # 세션 조회 - 사용자 ID와 매칭
-            session = db.query(ChatSession).filter(
-                ChatSession.id == session_id,
-                ChatSession.user_id == effective_user_id
-            ).first()
-
-            if session:
-                result_message = ChatMessage(
-                    session_id=session.id,
-                    user_id=effective_user_id,
-                    role='assistant',
-                    message_text=f"예측 단어: {predicted_word} (신뢰도: {confidence:.2f})\n생성 문장: {sentence_text}"
-                )
-                db.add(result_message)
-                db.commit()
-    else:
-        message = "Prediction failed with low confidence."
-
-    return PredictionResponse(
-        words=words_list,
-        sentence=sentence_text,
-        message=message,
-        session_id=session_id if session_id else 0
-    )
