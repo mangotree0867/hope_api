@@ -133,7 +133,7 @@ async def predict_video(
 
         # 결과를 메시지로 포맷
         if detected_words:
-            message = detected_words.generated_sentence
+            message = detected_words["generated_sentence"]
         else:
             message = "수화를 감지하지 못했습니다. 다시 시도해주세요."
 
@@ -150,7 +150,7 @@ async def predict_video(
         assistant_message_id = assistant_message.id
 
         return PredictionResponse(
-            words=detected_words.recognized_words,
+            words=detected_words["recognized_words"],
             sentence=message,
             session_id=session.id,
             user_message_id=user_message_id,

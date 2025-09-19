@@ -6,7 +6,6 @@ import warnings
 import logging
 import cv2
 from fastapi import File, HTTPException, UploadFile
-from app.schemas.prediction import VideoProcessingResponse
 import mediapipe as mp
 import numpy as np
 import pandas as pd
@@ -30,14 +29,8 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 예측 로직 상수
-MIN_SEQUENCE_LENGTH = 10
-MIN_NO_HANDS_DURATION = 0.5
-MIN_DETECTION_DURATION = 0.5
-CONFIDENCE_THRESHOLD = 0.5
-
-# 입력 특징 차원 (고정값 - 저장된 모델과 일치)
-INPUT_FEATURES_DIM = 512
+WORD_LIST_PATH = settings.WORD_LIST_CSV_PATH
+MODEL_PATH = settings.MODEL_PATH
 
 # 모델 하이퍼파라미터
 MAX_SEQ_LENGTH = 70
@@ -46,8 +39,15 @@ NUM_HEADS = 8
 NUM_ENCODER_LAYERS = 4
 DROPOUT = 0.2
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-WORD_LIST_PATH = settings.WORD_LIST_CSV_PATH
-MODEL_PATH = settings.MODEL_PATH
+
+# 예측 로직 상수
+MIN_SEQUENCE_LENGTH = 10
+MIN_NO_HANDS_DURATION = 0.5
+MIN_DETECTION_DURATION = 0.5
+CONFIDENCE_THRESHOLD = 0.5
+
+# --- 2. 전역 변수 및 객체 로딩 (서버 시작 시 1회 실행) ---
+feature_extractor = FeatureExtractor()
 
 # 단어 매핑 및 라벨 인코더 로드
 try:
@@ -58,6 +58,9 @@ try:
     label_encoder.fit(list(word_mapping.keys())[:NUM_CLASSES])
 except FileNotFoundError:
     raise RuntimeError(f"필수 파일 '{WORD_LIST_PATH}'를 찾을 수 없습니다. 서버를 시작할 수 없습니다.")
+
+# 입력 특징 차원 (고정값 - 저장된 모델과 일치)
+INPUT_FEATURES_DIM = 512
 
 # 모델 로드
 model = SignLanguageTransformer(
@@ -70,6 +73,12 @@ model = SignLanguageTransformer(
     max_len=MAX_SEQ_LENGTH
 ).to(DEVICE)
 
+try:
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    model.eval()
+except FileNotFoundError:
+    raise RuntimeError(f"모델 가중치 파일 '{MODEL_PATH}'를 찾을 수 없습니다. 서버를 시작할 수 없습니다.")
+
 # 경고 메시지 억제
 warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.symbol_database")
 warnings.filterwarnings("ignore", message=".*SymbolDatabase.GetPrototype.*")
@@ -79,9 +88,7 @@ warnings.filterwarnings("ignore", message="A column-vector y was passed when a 1
 genai.configure(api_key=settings.GOOGLE_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
-feature_extractor = FeatureExtractor()
-
-async def predict_from_video(video_file: UploadFile) -> VideoProcessingResponse:
+async def predict_from_video(video_file: UploadFile):
     """비디오 파일 경로를 받아 수어 단어를 인식하고, 긴급 문장을 생성합니다.
 
     Args:
@@ -146,13 +153,9 @@ async def predict_from_video(video_file: UploadFile) -> VideoProcessingResponse:
                         
                         if top_prob[0, 0].item() > CONFIDENCE_THRESHOLD:
                             idx = top_idx[0, 0].item()
-                            confidence = top_prob[0, 0].item()
                             word_label = label_encoder.inverse_transform([idx])[0]
                             predicted_word = word_mapping.get(word_label, "Unknown")
-                            accumulated_words.append({
-                                "word": predicted_word,
-                                "confidence": confidence
-                            })
+                            accumulated_words.append(predicted_word)
                     
                     detecting = False
                     sequence_buffer.clear()
@@ -162,12 +165,9 @@ async def predict_from_video(video_file: UploadFile) -> VideoProcessingResponse:
         
         cap.release()
 
-        logger.info(f"Accumulated words: {accumulated_words}")
-
         sentence = "문장을 생성하기에 감지된 단어가 부족합니다."
         if gemini_model and len(accumulated_words) >= 2:
-            word_list = [word_info["word"] for word_info in accumulated_words]
-            prompt = f"다음 한국어 수어 단어들을 사용하여 긴급 상황에서 구급대원에게 전달할 수 있는 간결하고 명확한 문장 하나를 '~해주세요' 형태로 생성하세요: {', '.join(word_list)}."
+            prompt = f"다음 한국어 수어 단어들을 사용하여 긴급 상황에서 구급대원에게 전달할 수 있는 간결하고 명확한 문장 하나를 '~해주세요' 형태로 생성하세요: {', '.join(accumulated_words)}."
             try:
                 response = gemini_model.generate_content(prompt)
                 sentence = response.text.strip()
