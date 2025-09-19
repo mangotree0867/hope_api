@@ -18,7 +18,7 @@ class Settings:
     BASE_DIR = Path(__file__).resolve().parent.parent.parent
     LABELS_CSV_PATH: str = str(BASE_DIR / "labels.csv")
     WORD_LIST_CSV_PATH: str = str(BASE_DIR / "SL_Partner_Word_List_01.csv")
-    MODEL_PATH: str = str(BASE_DIR / "models" / "best_model_compound_cam220.pth")
+    MODEL_PATH: str = str(BASE_DIR / "models" / "best_sign_language_model-gemini-v2_dim2.pth")
 
     # ML 모델 설정
     MAX_SEQ_LENGTH: int = 70

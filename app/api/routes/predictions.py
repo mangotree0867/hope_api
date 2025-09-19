@@ -10,16 +10,12 @@ from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.config import settings
 from app.models.auth import User
 from app.services.auth import get_optional_user
 from app.models.chat import ChatSession, ChatMessage
-from app.schemas.prediction import PredictionRequest, PredictionResponse
+from app.schemas.prediction import  PredictionResponse
 from app.schemas.auth import ErrorResponse
-from app.services.ml_service import (
-    extract_all_features, log_debug, generate_emergency_sentence,
-    model, device, label_encoder, process_and_predict_from_mp4, word_mapping
-)
+from app.services.ml_service import predict_from_video
 from app.services.s3_service import get_s3_service
 
 router = APIRouter(tags=["Predictions"])
@@ -106,11 +102,6 @@ async def predict_video(
             detail="Failed to upload video to storage"
         )
 
-    # 임시 파일로 저장 (OpenCV 처리용)
-    with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp_file:
-        tmp_file.write(video_bytes)
-        tmp_path = tmp_file.name
-
     user_message_id = None
     assistant_message_id = None
 
@@ -128,22 +119,21 @@ async def predict_video(
         db.refresh(user_message)
         user_message_id = user_message.id
 
-        # 비디오에서 모든 프레임 추출 (FAST-API와 동일한 로직)
-        detected_words = await process_and_predict_from_mp4(tmp_path)
+        # Create a new UploadFile from the video bytes for prediction
+        import io
+        from fastapi import UploadFile
 
-        # 문장 생성 (FAST-API와 동일)
-        if detected_words and len(detected_words) >= 2:
-            word_list = [word_info["word"] for word_info in detected_words]
-            sentence = generate_emergency_sentence(word_list)
-        else:
-            sentence = "문장 생성을 위해 최소 2개의 단어가 필요합니다."
+        video_file_for_prediction = UploadFile(
+            file=io.BytesIO(video_bytes),
+            filename=file.filename,
+            headers=file.headers
+        )
 
-        log_debug(f"최종 결과: words={detected_words}, sentence={sentence}")
+        detected_words = await predict_from_video(video_file_for_prediction)
 
         # 결과를 메시지로 포맷
         if detected_words:
-            words_str = ", ".join([f"{w['word']} ({w['confidence']:.1%})" for w in detected_words])
-            message = f"감지된 단어: {words_str}\n\n생성된 문장: {sentence}"
+            message = detected_words.generated_sentence
         else:
             message = "수화를 감지하지 못했습니다. 다시 시도해주세요."
 
@@ -160,9 +150,8 @@ async def predict_video(
         assistant_message_id = assistant_message.id
 
         return PredictionResponse(
-            words=detected_words,
-            sentence=sentence,
-            message=message,
+            words=detected_words.recognized_words,
+            sentence=message,
             session_id=session.id,
             user_message_id=user_message_id,
             assistant_message_id=assistant_message_id
@@ -173,6 +162,3 @@ async def predict_video(
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)

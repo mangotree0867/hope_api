@@ -17,3 +17,7 @@ class VideoPredictionResponse(BaseModel):
     top_predictions: List[Dict[str, Union[str, float]]]
     summary: Dict[str, Union[int, float, str]]
     sentence: str
+
+class VideoProcessingResponse(BaseModel):
+    recognized_words: List[str]
+    generated_sentence: str

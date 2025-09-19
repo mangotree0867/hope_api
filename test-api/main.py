@@ -1,43 +1,28 @@
-from collections import deque
-import os
-import sys
+import uvicorn
+from fastapi import FastAPI, UploadFile, File, HTTPException
 import tempfile
-import warnings
-import logging
+import os
 import cv2
-from fastapi import File, HTTPException, UploadFile
-from app.schemas.prediction import VideoProcessingResponse
-import mediapipe as mp
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from collections import deque
 from sklearn.preprocessing import LabelEncoder
-from datetime import datetime
 import google.generativeai as genai
-from typing import List, Dict, Union, Optional, Tuple
 from dotenv import load_dotenv
 
-from app.core.config import settings
-from app.services.model import SignLanguageTransformer
-from app.services.preproces import FeatureExtractor
+# 로컬 모듈 import
+from model import SignLanguageTransformer
+from preprocess import FeatureExtractor
 
-# Load environment variables
-load_dotenv()
+# --- 1. 설정 및 초기화 ---
+load_dotenv() # .env 파일에서 환경 변수 로드
 
-# Logger 설정
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# 예측 로직 상수
-MIN_SEQUENCE_LENGTH = 10
-MIN_NO_HANDS_DURATION = 0.5
-MIN_DETECTION_DURATION = 0.5
-CONFIDENCE_THRESHOLD = 0.5
-
-# 입력 특징 차원 (고정값 - 저장된 모델과 일치)
-INPUT_FEATURES_DIM = 512
+# 경로 및 환경 변수
+WEIGHTS_PATH = r"./weights/best_sign_language_model-gemini-v2_dim2.pth"
+WORD_LIST_PATH = r"./data/SL_Partner_Word_List_01.csv"
+GOOGLE_API_KEY = "AIzaSyAVC5CMiAupzwWGEoGay6vFEhUwwmBzgcw"
 
 # 모델 하이퍼파라미터
 MAX_SEQ_LENGTH = 70
@@ -46,8 +31,16 @@ NUM_HEADS = 8
 NUM_ENCODER_LAYERS = 4
 DROPOUT = 0.2
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-WORD_LIST_PATH = settings.WORD_LIST_CSV_PATH
-MODEL_PATH = settings.MODEL_PATH
+
+# 예측 로직 상수
+MIN_SEQUENCE_LENGTH = 10
+MIN_NO_HANDS_DURATION = 0.5
+MIN_DETECTION_DURATION = 0.5
+CONFIDENCE_THRESHOLD = 0.5
+
+# --- 2. 전역 변수 및 객체 로딩 (서버 시작 시 1회 실행) ---
+app = FastAPI(title="Sign Language Recognition API")
+feature_extractor = FeatureExtractor()
 
 # 단어 매핑 및 라벨 인코더 로드
 try:
@@ -58,6 +51,9 @@ try:
     label_encoder.fit(list(word_mapping.keys())[:NUM_CLASSES])
 except FileNotFoundError:
     raise RuntimeError(f"필수 파일 '{WORD_LIST_PATH}'를 찾을 수 없습니다. 서버를 시작할 수 없습니다.")
+
+# 입력 특징 차원 (고정값 - 저장된 모델과 일치)
+INPUT_FEATURES_DIM = 512
 
 # 모델 로드
 model = SignLanguageTransformer(
@@ -70,26 +66,25 @@ model = SignLanguageTransformer(
     max_len=MAX_SEQ_LENGTH
 ).to(DEVICE)
 
-# 경고 메시지 억제
-warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.symbol_database")
-warnings.filterwarnings("ignore", message=".*SymbolDatabase.GetPrototype.*")
-warnings.filterwarnings("ignore", message="A column-vector y was passed when a 1d array was expected")
+try:
+    model.load_state_dict(torch.load(WEIGHTS_PATH, map_location=DEVICE))
+    model.eval()
+except FileNotFoundError:
+    raise RuntimeError(f"모델 가중치 파일 '{WEIGHTS_PATH}'를 찾을 수 없습니다. 서버를 시작할 수 없습니다.")
 
-# Gemini API 설정
-genai.configure(api_key=settings.GOOGLE_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+# Gemini API 초기화
+gemini_model = None
+if GOOGLE_API_KEY:
+    try:
+        genai.configure(api_key=GOOGLE_API_KEY)
+        gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+    except Exception as e:
+        gemini_model = None # 초기화 실패 시 모델 비활성화
 
-feature_extractor = FeatureExtractor()
-
-async def predict_from_video(video_file: UploadFile) -> VideoProcessingResponse:
-    """비디오 파일 경로를 받아 수어 단어를 인식하고, 긴급 문장을 생성합니다.
-
-    Args:
-        video_file: file
-
-    Returns:
-        VideoProcessingResponse: Response containing recognized_words and generated_sentence
-    """
+# --- 3. API 엔드포인트 ---
+@app.post("/predict/")
+async def predict_from_video(video_file: UploadFile = File(...)):
+    """비디오 파일을 업로드받아 수어 단어를 인식하고, 긴급 문장을 생성합니다."""
     video_path = ""
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
@@ -146,13 +141,9 @@ async def predict_from_video(video_file: UploadFile) -> VideoProcessingResponse:
                         
                         if top_prob[0, 0].item() > CONFIDENCE_THRESHOLD:
                             idx = top_idx[0, 0].item()
-                            confidence = top_prob[0, 0].item()
                             word_label = label_encoder.inverse_transform([idx])[0]
                             predicted_word = word_mapping.get(word_label, "Unknown")
-                            accumulated_words.append({
-                                "word": predicted_word,
-                                "confidence": confidence
-                            })
+                            accumulated_words.append(predicted_word)
                     
                     detecting = False
                     sequence_buffer.clear()
@@ -162,12 +153,9 @@ async def predict_from_video(video_file: UploadFile) -> VideoProcessingResponse:
         
         cap.release()
 
-        logger.info(f"Accumulated words: {accumulated_words}")
-
-        sentence = "문장을 생성하기에 감지된 단어가 부족합니다."
+        sentence = "문장을 생성하기에 단어가 부족하거나 Gemini API를 사용할 수 없습니다."
         if gemini_model and len(accumulated_words) >= 2:
-            word_list = [word_info["word"] for word_info in accumulated_words]
-            prompt = f"다음 한국어 수어 단어들을 사용하여 긴급 상황에서 구급대원에게 전달할 수 있는 간결하고 명확한 문장 하나를 '~해주세요' 형태로 생성하세요: {', '.join(word_list)}."
+            prompt = f"다음 한국어 수어 단어들을 사용하여 긴급 상황에서 구급대원에게 전달할 수 있는 간결하고 명확한 문장 하나를 '~해주세요' 형태로 생성하세요: {', '.join(accumulated_words)}."
             try:
                 response = gemini_model.generate_content(prompt)
                 sentence = response.text.strip()
@@ -181,3 +169,6 @@ async def predict_from_video(video_file: UploadFile) -> VideoProcessingResponse:
             os.unlink(video_path)
 
     return {"recognized_words": list(set(accumulated_words)), "generated_sentence": sentence}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)

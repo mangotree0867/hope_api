@@ -13,6 +13,7 @@ email-validator
 
 # 머신러닝 및 컴퓨터 비전 - 최신 호환 가능 버전 사용
 torch
+torchvision
 opencv-python-headless
 mediapipe
 numpy
