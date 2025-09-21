@@ -36,7 +36,7 @@ ANONYMOUS_USER_ID = 1
 )
 async def predict_video(
     file: UploadFile = File(..., description="Video file to process (.mp4, .avi, .mov, .webm, .mkv)"),
-    category: CategoryEnum = Form(..., description="Emergency category (1=외상/Trauma, 2=내상/Internal injury, 3=화재상황/Fire, 4=도심상황/Urban)"),
+    category: CategoryEnum = Form(..., description="Emergency category (TRAUMA=외상/Trauma, INTERNAL_INJURY=내상/Internal injury, FIRE_SITUATION=화재상황/Fire, URBAN_SITUATION=도심상황/Urban)"),
     context: str = Form("", description="Additional context words to help generate the emergency message (e.g., '골절 다리' for fracture leg)"),
     current_user: Optional[User] = Depends(get_optional_user),
     session_id: Optional[int] = Query(None, description="Existing chat session ID (optional, creates new session if not provided)"),
@@ -49,11 +49,22 @@ async def predict_video(
     - 선택사항: 토큰이 제공되면 사용자와 연결, 없으면 임시 세션 생성
     - 임시 세션은 로그인하지 않은 사용자도 사용 가능
 
+    **매개변수:**
+    - **file**: 처리할 비디오 파일 (.mp4, .avi, .mov, .webm, .mkv)
+    - **category**: 응급 상황 카테고리
+      - TRAUMA (외상): 외부 부상 상황
+      - INTERNAL_INJURY (내상): 내부 부상 상황
+      - FIRE_SITUATION (화재상황): 화재 관련 응급 상황
+      - URBAN_SITUATION (도심상황): 도심 지역 응급 상황
+    - **context**: 추가 컨텍스트 단어 (선택사항, 예: "골절 다리")
+    - **session_id**: 기존 채팅 세션 ID (선택사항, 없으면 새 세션 생성)
+
     **처리 과정:**
     1. 비디오 파일 업로드 및 S3 저장
     2. 프레임 추출 및 특징 분석
     3. ML 모델을 통한 수화 예측
-    4. 채팅 세션에 사용자 메시지(비디오) 및 어시스턴트 응답 추가
+    4. 카테고리와 컨텍스트를 활용한 긴급 메시지 생성
+    5. 채팅 세션에 사용자 메시지(비디오) 및 어시스턴트 응답 추가
 
     **지원 형식:** .mp4, .avi, .mov, .webm, .mkv
     **최소 요구사항:** 10프레임 이상
