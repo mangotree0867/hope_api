@@ -1,40 +1,28 @@
-from collections import deque
-import os
-import re
-import sys
-import tempfile
-import warnings
-import logging
 import cv2
-from fastapi import File, HTTPException, UploadFile
-import mediapipe as mp
 import numpy as np
 import pandas as pd
-
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from collections import deque
 from sklearn.preprocessing import LabelEncoder
-from datetime import datetime
 import google.generativeai as genai
-from typing import List, Dict, Union, Optional, Tuple
 from dotenv import load_dotenv
+import re
+import tempfile
+import os
+from fastapi import FastAPI, UploadFile, Form, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-from app.core.config import settings
-from app.services.model import SignLanguageTransformer
-from app.services.preproces import FeatureExtractor
+from model import SignLanguageTransformer
+from preprocess import FeatureExtractor
 
-# Load environment variables
 load_dotenv()
 
-# Logger 설정
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+WEIGHTS_PATH = r"./weights/best_sign_language_model-gemini-v2_dim2.pth"
+WORD_LIST_PATH = r"./data/SL_Partner_Word_List_01.csv"
+GOOGLE_API_KEY = r"AIzaSyAVC5CMiAupzwWGEoGay6vFEhUwwmBzgcw"
 
-WORD_LIST_PATH = settings.WORD_LIST_CSV_PATH
-MODEL_PATH = settings.MODEL_PATH
-
-# 모델 하이퍼파라미터
 MAX_SEQ_LENGTH = 70
 MODEL_DIM = 256
 NUM_HEADS = 8
@@ -42,29 +30,37 @@ NUM_ENCODER_LAYERS = 4
 DROPOUT = 0.2
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# 예측 로직 상수
 MIN_SEQUENCE_LENGTH = 10
 MIN_NO_HANDS_DURATION = 0.5
 MIN_DETECTION_DURATION = 0.5
-CONFIDENCE_THRESHOLD = 0.5
+CONFIDENCE_THRESHOLD = 0.3
 
-# --- 2. 전역 변수 및 객체 로딩 (서버 시작 시 1회 실행) ---
+CATEGORY_MAPPING = {
+    "1": "외상",
+    "2": "내상",
+    "3": "화재상황",
+    "4": "도심상황",
+    "외상": "외상",
+    "내상": "내상",
+    "화재상황": "화재상황",
+    "도심상황": "도심상황"
+}
+
+app = FastAPI()  # FastAPI 앱 생성
+
+# 모델과 리소스 초기화 (앱 시작 시 한 번 로드)
 feature_extractor = FeatureExtractor()
 
-# 단어 매핑 및 라벨 인코더 로드
-try:
-    word_df = pd.read_csv(WORD_LIST_PATH)
-    word_mapping = dict(zip(word_df['number'].astype(str), word_df['word']))
-    NUM_CLASSES = 48
-    label_encoder = LabelEncoder()
-    label_encoder.fit(list(word_mapping.keys())[:NUM_CLASSES])
-except FileNotFoundError:
-    raise RuntimeError(f"필수 파일 '{WORD_LIST_PATH}'를 찾을 수 없습니다. 서버를 시작할 수 없습니다.")
+word_df = pd.read_csv(WORD_LIST_PATH)
+word_mapping = dict(zip(word_df['number'].astype(str), word_df['word']))
+NUM_CLASSES = 48
+label_encoder = LabelEncoder()
+label_encoder.fit(list(word_mapping.keys())[:NUM_CLASSES])
 
-# 입력 특징 차원 (고정값 - 저장된 모델과 일치)
-INPUT_FEATURES_DIM = 512
+dummy_img = np.zeros((720, 1280, 3), dtype=np.uint8)
+temp_features, _, _ = feature_extractor.get_combined_features(dummy_img, {})
+INPUT_FEATURES_DIM = len(temp_features)
 
-# 모델 로드
 model = SignLanguageTransformer(
     num_classes=NUM_CLASSES,
     input_features=INPUT_FEATURES_DIM,
@@ -75,24 +71,17 @@ model = SignLanguageTransformer(
     max_len=MAX_SEQ_LENGTH
 ).to(DEVICE)
 
-try:
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
-    model.eval()
-except FileNotFoundError:
-    raise RuntimeError(f"모델 가중치 파일 '{MODEL_PATH}'를 찾을 수 없습니다. 서버를 시작할 수 없습니다.")
+model.load_state_dict(torch.load(WEIGHTS_PATH, map_location=DEVICE, weights_only=True))
+model.eval()
 
-# 경고 메시지 억제
-warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.symbol_database")
-warnings.filterwarnings("ignore", message=".*SymbolDatabase.GetPrototype.*")
-warnings.filterwarnings("ignore", message="A column-vector y was passed when a 1d array was expected")
-
-# Gemini API 설정
-genai.configure(api_key=settings.GOOGLE_API_KEY)
+genai.configure(api_key=GOOGLE_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
+# 원본 함수 (변경 없음)
 def predict_from_video(video_path, category, context):
-    # category is already the Korean name (e.g., "외상", "내상", etc.) from CategoryEnum
-    category_name = category
+    if category not in CATEGORY_MAPPING:
+        raise ValueError("유효하지 않은 카테고리입니다.")
+    category_name = CATEGORY_MAPPING.get(category, "외상")
 
     context = re.sub(r'\s+', ' ', context.strip())
     context_words = context.split() if context else []
@@ -176,3 +165,33 @@ def predict_from_video(video_path, category, context):
             sentence = f"{category_name} 상황에서 {' '.join(accumulated_words)}입니다. 빠르게 도와주세요."
 
     return {"recognized_words": list(set(accumulated_words)), "generated_sentence": sentence}
+
+# API 엔드포인트
+@app.post("/predict")
+async def predict(
+    video: UploadFile = UploadFile(...),  # 비디오 파일 업로드 (필수)
+    category: str = Form(...),  # Form 데이터로 category 받음 (필수)
+    context: str = Form("")  # Form 데이터로 context 받음 (선택)
+):
+    try:
+        # 업로드된 비디오를 임시 파일로 저장
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+            temp_file.write(await video.read())
+            temp_video_path = temp_file.name
+
+        # 원본 함수 호출
+        result = predict_from_video(temp_video_path, category, context)
+
+        # 임시 파일 삭제
+        os.unlink(temp_video_path)
+
+        return JSONResponse(content=result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"서버 오류: {str(e)}")
+
+# 앱 실행 (uvicorn main:app --reload 로 로컬 테스트)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

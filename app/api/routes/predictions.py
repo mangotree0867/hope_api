@@ -1,12 +1,8 @@
 import os
-import cv2
-import base64
-import numpy as np
 import tempfile
-import torch
-import torch.nn.functional as F
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Query
+from enum import Enum
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Query, Form
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -17,6 +13,13 @@ from app.schemas.prediction import  PredictionResponse
 from app.schemas.auth import ErrorResponse
 from app.services.ml_service import predict_from_video
 from app.services.s3_service import get_s3_service
+
+# Category enum matching the ML service
+class CategoryEnum(str, Enum):
+    TRAUMA = "외상"
+    INTERNAL_INJURY = "내상"
+    FIRE_SITUATION = "화재상황"
+    URBAN_SITUATION = "도심상황"
 
 router = APIRouter(tags=["Predictions"])
 
@@ -33,6 +36,8 @@ ANONYMOUS_USER_ID = 1
 )
 async def predict_video(
     file: UploadFile = File(..., description="Video file to process (.mp4, .avi, .mov, .webm, .mkv)"),
+    category: CategoryEnum = Form(..., description="Emergency category (1=외상/Trauma, 2=내상/Internal injury, 3=화재상황/Fire, 4=도심상황/Urban)"),
+    context: str = Form("", description="Additional context words to help generate the emergency message (e.g., '골절 다리' for fracture leg)"),
     current_user: Optional[User] = Depends(get_optional_user),
     session_id: Optional[int] = Query(None, description="Existing chat session ID (optional, creates new session if not provided)"),
     db: Session = Depends(get_db)
@@ -119,17 +124,26 @@ async def predict_video(
         db.refresh(user_message)
         user_message_id = user_message.id
 
-        # Create a new UploadFile from the video bytes for prediction
-        import io
-        from fastapi import UploadFile
+        # Save video temporarily for prediction
+        import tempfile
+        from app.services.ml_service import predict_from_video
 
-        video_file_for_prediction = UploadFile(
-            file=io.BytesIO(video_bytes),
-            filename=file.filename,
-            headers=file.headers
-        )
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+            tmp_file.write(video_bytes)
+            tmp_file_path = tmp_file.name
 
-        detected_words = await predict_from_video(video_file_for_prediction)
+        try:
+            # Call predict_from_video with user-provided category and context
+            detected_words = predict_from_video(
+                video_path=tmp_file_path,
+                category=category.value,
+                context=context
+            )
+        finally:
+            # Clean up temp file
+            import os as temp_os
+            if temp_os.path.exists(tmp_file_path):
+                temp_os.unlink(tmp_file_path)
 
         # 결과를 메시지로 포맷
         if detected_words:
