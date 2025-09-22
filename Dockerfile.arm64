@@ -28,6 +28,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY app/ ./app/
 COPY models/ ./models/
 COPY SL_Partner_Word_List_01.csv ./
+COPY scaler.pkl ./
+COPY label_map.json ./
 # DO NOT COPY .env - pass as environment variables at runtime
 
 # 로그를 위한 디렉토리 생성
