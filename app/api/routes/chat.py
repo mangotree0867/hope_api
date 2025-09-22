@@ -95,6 +95,7 @@ async def get_session_messages(
             "id": session.id,
             "user_id": session.user_id,
             "session_title": session.session_title,
+            "location": session.location,
             "created_at": session.created_at
         },
         messages=[
