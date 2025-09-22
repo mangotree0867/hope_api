@@ -16,17 +16,9 @@ class Settings:
 
     # ML 모델 경로 설정
     BASE_DIR = Path(__file__).resolve().parent.parent.parent
-    LABELS_CSV_PATH: str = str(BASE_DIR / "labels.csv")
-    WORD_LIST_CSV_PATH: str = str(BASE_DIR / "SL_Partner_Word_List_01.csv")
-    MODEL_PATH: str = str(BASE_DIR / "models" / "best_sign_language_model-gemini-v2_dim2.pth")
-
-    # ML 모델 설정
-    MAX_SEQ_LENGTH: int = 70
-    NUM_FEATURES: int = 335
-
-    # MediaPipe 설정
-    MIN_DETECTION_CONFIDENCE: float = 0.5
-    MIN_TRACKING_CONFIDENCE: float = 0.5
+    SCALER_PATH: str = str(BASE_DIR / "scaler.pkl")
+    LABEL_MAP_PATH: str = str(BASE_DIR / "label_map.json")
+    WEIGHTS_PATH: str = str(BASE_DIR / "models" / "best_dynamic_features_model.pth")
 
     def __init__(self):
         if not self.GOOGLE_API_KEY:

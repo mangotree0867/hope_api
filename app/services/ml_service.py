@@ -1,4 +1,5 @@
 from collections import deque
+import json
 import os
 import re
 import sys
@@ -31,8 +32,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-WORD_LIST_PATH = settings.WORD_LIST_CSV_PATH
-MODEL_PATH = settings.MODEL_PATH
+SCALER_PATH = settings.SCALER_PATH
+LABEL_MAP_PATH = settings.LABEL_MAP_PATH
+WEIGHTS_PATH = settings.WEIGHTS_PATH
+GOOGLE_API_KEY = settings.GOOGLE_API_KEY
 
 # 모델 하이퍼파라미터
 MAX_SEQ_LENGTH = 70
@@ -41,6 +44,11 @@ NUM_HEADS = 8
 NUM_ENCODER_LAYERS = 4
 DROPOUT = 0.2
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+INPUT_FEATURES_DIM = 347  # 새로운 특징 벡터 차원
+MIN_SEQUENCE_LENGTH = 10
+MIN_NO_HANDS_DURATION = 0.5
+MIN_DETECTION_DURATION = 0.5
+CONFIDENCE_THRESHOLD = 0.3
 
 # 예측 로직 상수
 MIN_SEQUENCE_LENGTH = 10
@@ -49,22 +57,13 @@ MIN_DETECTION_DURATION = 0.5
 CONFIDENCE_THRESHOLD = 0.5
 
 # --- 2. 전역 변수 및 객체 로딩 (서버 시작 시 1회 실행) ---
-feature_extractor = FeatureExtractor()
+feature_extractor = FeatureExtractor(scaler_path=SCALER_PATH)
 
-# 단어 매핑 및 라벨 인코더 로드
-try:
-    word_df = pd.read_csv(WORD_LIST_PATH)
-    word_mapping = dict(zip(word_df['number'].astype(str), word_df['word']))
-    NUM_CLASSES = 48
-    label_encoder = LabelEncoder()
-    label_encoder.fit(list(word_mapping.keys())[:NUM_CLASSES])
-except FileNotFoundError:
-    raise RuntimeError(f"필수 파일 '{WORD_LIST_PATH}'를 찾을 수 없습니다. 서버를 시작할 수 없습니다.")
+# 라벨 맵 로드
+with open(LABEL_MAP_PATH, 'r', encoding='utf-8') as f:
+    word_mapping = json.load(f)
+NUM_CLASSES = len(word_mapping)
 
-# 입력 특징 차원 (고정값 - 저장된 모델과 일치)
-INPUT_FEATURES_DIM = 512
-
-# 모델 로드
 model = SignLanguageTransformer(
     num_classes=NUM_CLASSES,
     input_features=INPUT_FEATURES_DIM,
@@ -75,23 +74,19 @@ model = SignLanguageTransformer(
     max_len=MAX_SEQ_LENGTH
 ).to(DEVICE)
 
-try:
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
-    model.eval()
-except FileNotFoundError:
-    raise RuntimeError(f"모델 가중치 파일 '{MODEL_PATH}'를 찾을 수 없습니다. 서버를 시작할 수 없습니다.")
+model.load_state_dict(torch.load(WEIGHTS_PATH, map_location=DEVICE, weights_only=True))
+model.eval()
+
+genai.configure(api_key=GOOGLE_API_KEY)
+gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
 # 경고 메시지 억제
 warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.symbol_database")
 warnings.filterwarnings("ignore", message=".*SymbolDatabase.GetPrototype.*")
 warnings.filterwarnings("ignore", message="A column-vector y was passed when a 1d array was expected")
 
-# Gemini API 설정
-genai.configure(api_key=settings.GOOGLE_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-
 def predict_from_video(video_path, category, context):
-    # category is already the Korean name (e.g., "외상", "내상", etc.) from CategoryEnum
+    # category is already the Korean name from CategoryEnum (e.g., "외상", "내상", etc.)
     category_name = category
 
     context = re.sub(r'\s+', ' ', context.strip())
@@ -110,7 +105,8 @@ def predict_from_video(video_path, category, context):
 
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret: break
+        if not ret:
+            break
 
         current_time_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
         features, current_data, hands_results = feature_extractor.get_combined_features(frame, prev_data)
@@ -147,7 +143,7 @@ def predict_from_video(video_path, category, context):
 
                     if top_prob[0, 0].item() > CONFIDENCE_THRESHOLD:
                         idx = top_idx[0, 0].item()
-                        word_label = label_encoder.inverse_transform([idx])[0]
+                        word_label = str(idx)
                         predicted_word = word_mapping.get(word_label, "Unknown")
                         accumulated_words.append(predicted_word)
 
