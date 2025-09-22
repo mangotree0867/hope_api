@@ -38,6 +38,7 @@ async def predict_video(
     file: UploadFile = File(..., description="Video file to process (.mp4, .avi, .mov, .webm, .mkv)"),
     category: CategoryEnum = Form(..., description="Emergency category (TRAUMA=외상/Trauma, INTERNAL_INJURY=내상/Internal injury, FIRE_SITUATION=화재상황/Fire, URBAN_SITUATION=도심상황/Urban)"),
     context: str = Form("", description="Additional context words to help generate the emergency message (e.g., '골절 다리' for fracture leg)"),
+    location: Optional[str] = Form(None, description="Location/place information for the emergency (saved with new chat sessions)"),
     current_user: Optional[User] = Depends(get_optional_user),
     session_id: Optional[int] = Query(None, description="Existing chat session ID (optional, creates new session if not provided)"),
     db: Session = Depends(get_db)
@@ -57,6 +58,7 @@ async def predict_video(
       - FIRE_SITUATION (화재상황): 화재 관련 응급 상황
       - URBAN_SITUATION (도심상황): 도심 지역 응급 상황
     - **context**: 추가 컨텍스트 단어 (선택사항, 예: "골절 다리")
+    - **location**: 응급 상황 발생 장소 (선택사항, 새 세션 생성시 저장됨)
     - **session_id**: 기존 채팅 세션 ID (선택사항, 없으면 새 세션 생성)
 
     **처리 과정:**
@@ -86,7 +88,8 @@ async def predict_video(
         from datetime import datetime
         session = ChatSession(
             user_id=effective_user_id,
-            session_title=f"{datetime.now().strftime('%Y-%m-%d %H:%M')} 대화"
+            session_title=f"{datetime.now().strftime('%Y-%m-%d %H:%M')} 대화",
+            location=location
         )
         db.add(session)
         db.commit()
