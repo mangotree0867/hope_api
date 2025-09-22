@@ -19,6 +19,7 @@ class Settings:
     SCALER_PATH: str = str(BASE_DIR / "scaler.pkl")
     LABEL_MAP_PATH: str = str(BASE_DIR / "label_map.json")
     WEIGHTS_PATH: str = str(BASE_DIR / "models" / "best_dynamic_features_model.pth")
+    LABEL_WORD_LIST_PATH: str = str(BASE_DIR / "SL_Partner_Word_List_01.csv")
 
     def __init__(self):
         if not self.GOOGLE_API_KEY:

@@ -27,7 +27,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # 애플리케이션 코드 복사
 COPY app/ ./app/
 COPY models/ ./models/
-COPY labels.csv ./
 COPY SL_Partner_Word_List_01.csv ./
 # DO NOT COPY .env - pass as environment variables at runtime
 

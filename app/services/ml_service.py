@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 SCALER_PATH = settings.SCALER_PATH
 LABEL_MAP_PATH = settings.LABEL_MAP_PATH
+LABEL_WORD_LIST_PATH = settings.LABEL_WORD_LIST_PATH
 WEIGHTS_PATH = settings.WEIGHTS_PATH
 GOOGLE_API_KEY = settings.GOOGLE_API_KEY
 
@@ -61,8 +62,8 @@ feature_extractor = FeatureExtractor(scaler_path=SCALER_PATH)
 
 # 라벨 맵 로드
 with open(LABEL_MAP_PATH, 'r', encoding='utf-8') as f:
-    word_mapping = json.load(f)
-NUM_CLASSES = len(word_mapping)
+    word_mapping_for_count = json.load(f)
+NUM_CLASSES = len(word_mapping_for_count)
 
 model = SignLanguageTransformer(
     num_classes=NUM_CLASSES,
@@ -73,6 +74,15 @@ model = SignLanguageTransformer(
     dropout=DROPOUT,
     max_len=MAX_SEQ_LENGTH
 ).to(DEVICE)
+
+# [수정] CSV 파일에서 단어 매핑 정보 로드
+try:
+    df = pd.read_csv(LABEL_WORD_LIST_PATH)
+    # 'number' 열을 키로, 'word' 열을 값으로 하는 딕셔너리 생성
+    csv_word_mapping = pd.Series(df.word.values, index=df.number).to_dict()
+except FileNotFoundError:
+    raise Exception(f"CSV 파일을 찾을 수 없습니다. 경로를 확인해주세요: {LABEL_WORD_LIST_PATH}")
+
 
 model.load_state_dict(torch.load(WEIGHTS_PATH, map_location=DEVICE, weights_only=True))
 model.eval()
@@ -91,29 +101,23 @@ def predict_from_video(video_path, category, context):
 
     context = re.sub(r'\s+', ' ', context.strip())
     context_words = context.split() if context else []
-
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError("비디오 파일을 열 수 없습니다.")
-
     sequence_buffer = deque(maxlen=MAX_SEQ_LENGTH)
     accumulated_words = []
     prev_data = {}
     detecting = False
     hands_start_time = None
     no_hands_start_time = None
-
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
-
         current_time_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
         features, current_data, hands_results = feature_extractor.get_combined_features(frame, prev_data)
         prev_data = current_data
-
         hands_detected = hands_results.multi_hand_landmarks is not None
-
         if hands_detected:
             no_hands_start_time = None
             if hands_start_time is None:
@@ -123,7 +127,6 @@ def predict_from_video(video_path, category, context):
                 sequence_buffer.clear()
         else:
             hands_start_time = None
-
         if not hands_detected and detecting:
             if no_hands_start_time is None:
                 no_hands_start_time = current_time_sec
@@ -134,27 +137,21 @@ def predict_from_video(video_path, category, context):
                         padding = torch.zeros(MAX_SEQ_LENGTH - sequence_tensor.shape[0], INPUT_FEATURES_DIM)
                         sequence_tensor = torch.cat([sequence_tensor, padding], dim=0)
                     sequence_tensor = sequence_tensor.unsqueeze(0).to(DEVICE)
-
                     with torch.no_grad():
                         outputs = model(sequence_tensor)
-
                     probs = F.softmax(outputs, dim=1)
                     top_prob, top_idx = torch.topk(probs, 1, dim=1)
-
                     if top_prob[0, 0].item() > CONFIDENCE_THRESHOLD:
-                        idx = top_idx[0, 0].item()
-                        word_label = str(idx)
-                        predicted_word = word_mapping.get(word_label, "Unknown")
+                        predicted_index = top_idx[0, 0].item()
+                        word_key = f"W_{predicted_index + 1:03d}"
+                        # CSV에서 로드한 딕셔너리를 사용하여 단어 조회
+                        predicted_word = csv_word_mapping.get(word_key, "Unknown")
                         accumulated_words.append(predicted_word)
-
                 detecting = False
                 sequence_buffer.clear()
-
         if detecting:
             sequence_buffer.append(features)
-
     cap.release()
-
     sentence = "문장을 생성하기에 단어가 부족합니다."
     if gemini_model and len(accumulated_words) >= 2:
         prompt_parts = [
@@ -170,5 +167,4 @@ def predict_from_video(video_path, category, context):
             sentence = response.text.strip()
         except:
             sentence = f"{category_name} 상황에서 {' '.join(accumulated_words)}입니다. 빠르게 도와주세요."
-
     return {"recognized_words": list(set(accumulated_words)), "generated_sentence": sentence}
