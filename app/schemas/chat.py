@@ -27,3 +27,6 @@ class SessionMessagesResponse(BaseModel):
     session: ChatSessionResponse
     messages: List[ChatMessageResponse]
     total: int
+
+class UpdateSessionTitleRequest(BaseModel):
+    session_title: str

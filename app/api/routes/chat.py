@@ -6,7 +6,7 @@ from app.core.database import get_db
 from app.api.routes.auth import get_authenticated_user
 from app.models.auth import User
 from app.models.chat import ChatSession, ChatMessage
-from app.schemas.chat import ChatSessionsListResponse, SessionMessagesResponse
+from app.schemas.chat import ChatSessionsListResponse, SessionMessagesResponse, UpdateSessionTitleRequest
 from app.schemas.auth import ErrorResponse
 
 router = APIRouter(tags=["Chat"])
@@ -112,3 +112,38 @@ async def get_session_messages(
             ChatMessage.session_id == session_id
         ).count()
     )
+
+@router.put("/chat-sessions/{session_id}/title",
+    responses={
+        200: {"description": "Session title updated successfully"},
+        401: {"model": ErrorResponse, "description": "Invalid authentication credentials"},
+        404: {"model": ErrorResponse, "description": "Session not found or access denied"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
+async def update_session_title(
+    session_id: int,
+    request: UpdateSessionTitleRequest,
+    current_user: User = Depends(get_authenticated_user),
+    db: Session = Depends(get_db)
+):
+    """
+    사용자의 채팅 세션 제목을 업데이트합니다.
+
+    - **session_id**: 업데이트할 세션 ID
+    - **session_title**: 새로운 세션 제목
+    """
+    # 세션이 존재하고 현재 사용자에게 속하는지 확인
+    session = db.query(ChatSession).filter(
+        ChatSession.id == session_id,
+        ChatSession.user_id == current_user.id
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or access denied")
+
+    # 세션 제목 업데이트
+    session.session_title = request.session_title
+    db.commit()
+
+    return {"session_title": session.session_title}
