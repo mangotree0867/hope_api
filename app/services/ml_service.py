@@ -45,44 +45,36 @@ NUM_HEADS = 8
 NUM_ENCODER_LAYERS = 4
 DROPOUT = 0.2
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-INPUT_FEATURES_DIM = 347  # 새로운 특징 벡터 차원
+INPUT_FEATURES_DIM = 347
 MIN_SEQUENCE_LENGTH = 10
 MIN_NO_HANDS_DURATION = 0.5
 MIN_DETECTION_DURATION = 0.5
 CONFIDENCE_THRESHOLD = 0.3
 
-# 예측 로직 상수
-MIN_SEQUENCE_LENGTH = 10
-MIN_NO_HANDS_DURATION = 0.5
-MIN_DETECTION_DURATION = 0.5
-CONFIDENCE_THRESHOLD = 0.5
-
-# --- 2. 전역 변수 및 객체 로딩 (서버 시작 시 1회 실행) ---
+# --- 리소스 초기화 ---
 feature_extractor = FeatureExtractor(scaler_path=SCALER_PATH)
 
-# 라벨 맵 로드
-with open(LABEL_MAP_PATH, 'r', encoding='utf-8') as f:
-    word_mapping_for_count = json.load(f)
-NUM_CLASSES = len(word_mapping_for_count)
-
-model = SignLanguageTransformer(
-    num_classes=NUM_CLASSES,
-    input_features=INPUT_FEATURES_DIM,
-    d_model=MODEL_DIM,
-    nhead=NUM_HEADS,
-    num_encoder_layers=NUM_ENCODER_LAYERS,
-    dropout=DROPOUT,
-    max_len=MAX_SEQ_LENGTH
-).to(DEVICE)
-
-# [수정] CSV 파일에서 단어 매핑 정보 로드
+# CSV 파일에서 단어 매핑 정보 로드
 try:
     df = pd.read_csv(LABEL_WORD_LIST_PATH)
-    # 'number' 열을 키로, 'word' 열을 값으로 하는 딕셔너리 생성
     csv_word_mapping = pd.Series(df.word.values, index=df.number).to_dict()
 except FileNotFoundError:
     raise Exception(f"CSV 파일을 찾을 수 없습니다. 경로를 확인해주세요: {LABEL_WORD_LIST_PATH}")
 
+# 라벨 맵 로드 (인덱스 -> W_XXX 변환용)
+with open(LABEL_MAP_PATH, 'r', encoding='utf-8') as f:
+    label_map = json.load(f)
+# 딕셔너리를 뒤집어 {0: 'W_001', 1: 'W_002', ...} 형태로 만듭니다.
+idx_to_label_map = {v: k for k, v in label_map.items()}
+NUM_CLASSES = len(label_map) # 클래스 개수는 여기서 계산
+
+
+# --- 모델 초기화 ---
+model = SignLanguageTransformer(
+    num_classes=NUM_CLASSES, input_features=INPUT_FEATURES_DIM, d_model=MODEL_DIM,
+    nhead=NUM_HEADS, num_encoder_layers=NUM_ENCODER_LAYERS, dropout=DROPOUT,
+    max_len=MAX_SEQ_LENGTH
+).to(DEVICE)
 
 model.load_state_dict(torch.load(WEIGHTS_PATH, map_location=DEVICE, weights_only=True))
 model.eval()
@@ -143,10 +135,14 @@ def predict_from_video(video_path, category, context):
                     top_prob, top_idx = torch.topk(probs, 1, dim=1)
                     if top_prob[0, 0].item() > CONFIDENCE_THRESHOLD:
                         predicted_index = top_idx[0, 0].item()
-                        word_key = f"W_{predicted_index + 1:03d}"
-                        # CSV에서 로드한 딕셔너리를 사용하여 단어 조회
-                        predicted_word = csv_word_mapping.get(word_key, "Unknown")
-                        accumulated_words.append(predicted_word)
+                        
+                        # f-string 대신, 뒤집은 맵을 사용하여 인덱스로부터 W_XXX 키를 조회합니다.
+                        word_key = idx_to_label_map.get(predicted_index)
+                        
+                        if word_key: # 맵에 해당 인덱스가 있는 경우에만 처리
+                            # CSV에서 로드한 딕셔너리를 사용하여 단어 조회
+                            predicted_word = csv_word_mapping.get(word_key, "Unknown")
+                            accumulated_words.append(predicted_word)
                 detecting = False
                 sequence_buffer.clear()
         if detecting:
