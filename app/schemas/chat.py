@@ -15,7 +15,7 @@ class ChatSessionResponse(BaseModel):
     id: int
     user_id: int
     session_title: str
-    location: str
+    location: Optional[str]
     created_at: datetime
     message_count: Optional[int] = None
 
