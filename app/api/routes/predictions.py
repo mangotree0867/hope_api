@@ -13,6 +13,7 @@ from app.schemas.prediction import  PredictionResponse
 from app.schemas.auth import ErrorResponse
 from app.services.ml_service import predict_from_video
 from app.services.s3_service import get_s3_service
+from fastapi.responses import JSONResponse
 
 # Category enum matching the ML service
 class CategoryEnum(str, Enum):
@@ -41,7 +42,8 @@ async def predict_video(
     location: Optional[str] = Form(None, description="Location/place information for the emergency (saved with new chat sessions)"),
     current_user: Optional[User] = Depends(get_optional_user),
     session_id: Optional[int] = Query(None, description="Existing chat session ID (optional, creates new session if not provided)"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    reply_mode: str = Form("sentence")  # "sentence" or "words"
 ):
     """
     비디오 파일을 처리하여 수화 예측을 수행하고 채팅 세션에 결과를 저장합니다.
@@ -120,6 +122,7 @@ async def predict_video(
             status_code=500,
             detail="Failed to upload video to storage"
         )
+        
 
     user_message_id = None
     assistant_message_id = None
@@ -144,6 +147,8 @@ async def predict_video(
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
             tmp_file.write(video_bytes)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
             tmp_file_path = tmp_file.name
 
         try:
@@ -160,9 +165,21 @@ async def predict_video(
                 temp_os.unlink(tmp_file_path)
 
         # 결과를 메시지로 포맷
+        if reply_mode not in {"sentence", "words"}:
+            reply_mode = "sentence"
+
         if detected_words:
-            message = detected_words["generated_sentence"]
+            recognized_words = detected_words.get("recognized_words") or []
+            generated_sentence = detected_words.get("generated_sentence") or ""
+            if reply_mode == "words":
+                # DB message_text에는 단어 리스트만 간단히 사람이 읽을 수 있게 저장
+                message = ", ".join(recognized_words) if recognized_words else ""
+            else:
+                # sentence 모드
+                message = generated_sentence
         else:
+            recognized_words = []
+            generated_sentence = ""
             message = "수화를 감지하지 못했습니다. 다시 시도해주세요."
 
         # 채팅에 어시스턴트 메시지 추가
@@ -177,13 +194,17 @@ async def predict_video(
         db.refresh(assistant_message)
         assistant_message_id = assistant_message.id
 
-        return PredictionResponse(
-            words=detected_words["recognized_words"],
-            sentence=message,
-            session_id=session.id,
-            user_message_id=user_message_id,
-            assistant_message_id=assistant_message_id
-        )
+        resp = {
+            "session_id": session.id,
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+        }
+        if reply_mode == "words":
+            resp["words"] = recognized_words
+        else:
+            resp["sentence"] = message
+
+        return JSONResponse(content=resp)
 
     except HTTPException:
         raise
