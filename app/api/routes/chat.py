@@ -48,6 +48,7 @@ async def get_chat_sessions(
                 "user_id": session.ChatSession.user_id,
                 "session_title": session.ChatSession.session_title,
                 "location": session.ChatSession.location,
+                "category": session.ChatSession.category,
                 "created_at": session.ChatSession.created_at,
                 "message_count": session.message_count
             } for session in sessions
@@ -96,6 +97,7 @@ async def get_session_messages(
             "user_id": session.user_id,
             "session_title": session.session_title,
             "location": session.location,
+            "category": session.category,
             "created_at": session.created_at
         },
         messages=[

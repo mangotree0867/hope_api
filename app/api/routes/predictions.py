@@ -37,7 +37,7 @@ ANONYMOUS_USER_ID = 1
 )
 async def predict_video(
     file: UploadFile = File(..., description="Video file to process (.mp4, .avi, .mov, .webm, .mkv)"),
-    category: CategoryEnum = Form(..., description="Emergency category (TRAUMA=외상/Trauma, INTERNAL_INJURY=내상/Internal injury, FIRE_SITUATION=화재상황/Fire, URBAN_SITUATION=도심상황/Urban)"),
+    category: Optional[CategoryEnum] = Form(None, description="Emergency category (TRAUMA=외상/Trauma, INTERNAL_INJURY=내상/Internal injury, FIRE_SITUATION=화재상황/Fire, URBAN_SITUATION=도심상황/Urban)"),
     context: str = Form("", description="Additional context words to help generate the emergency message (e.g., '골절 다리' for fracture leg)"),
     location: Optional[str] = Form(None, description="Location/place information for the emergency (saved with new chat sessions)"),
     current_user: Optional[User] = Depends(get_optional_user),
@@ -91,6 +91,7 @@ async def predict_video(
         session = ChatSession(
             user_id=effective_user_id,
             session_title=f"{datetime.now().strftime('%Y-%m-%d %H:%M')} 대화",
+            category=category.value if category else None,
             location=location
         )
         db.add(session)
@@ -152,10 +153,10 @@ async def predict_video(
             tmp_file_path = tmp_file.name
 
         try:
-            # Call predict_from_video with user-provided category and context
+            category_value = session.category
             detected_words = predict_from_video(
                 video_path=tmp_file_path,
-                category=category.value,
+                category=category_value,
                 context=context
             )
         finally:

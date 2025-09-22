@@ -16,6 +16,7 @@ class ChatSession(Base):
     user_id = Column(Integer, index=True, nullable=False)
     session_title = Column(String(255), nullable=True)
     location = Column(Text, nullable=True)
+    category = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class ChatMessage(Base):
@@ -47,12 +48,14 @@ class ChatMessage(Base):
 class ChatSessionCreate(BaseModel):
     session_title: Optional[str] = None
     location: Optional[str] = None
+    category: Optional[str] = None
 
 class ChatSessionResponse(BaseModel):
     id: int
     user_id: int
     session_title: Optional[str]
     location: Optional[str]
+    category: Optional[str]
     created_at: datetime
     message_count: Optional[int] = 0
 
@@ -83,12 +86,13 @@ class ChatMessageResponse(BaseModel):
 # --- 채팅 서비스 기능 ---
 class ChatService:
     @staticmethod
-    def create_session(db: Session, user_id: int, title: Optional[str] = None, location: Optional[str] = None) -> ChatSession:
+    def create_session(db: Session, user_id: int, title: Optional[str] = None, location: Optional[str] = None, category: Optional[str] = None) -> ChatSession:
         """사용자를 위한 새로운 채팅 세션 생성"""
         session = ChatSession(
             user_id=user_id,
             session_title=title,
-            location=location
+            location=location,
+            category=category
         )
         db.add(session)
         db.commit()
