@@ -80,7 +80,7 @@ model.load_state_dict(torch.load(WEIGHTS_PATH, map_location=DEVICE, weights_only
 model.eval()
 
 genai.configure(api_key=GOOGLE_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+gemini_model = genai.GenerativeModel("gemini-2.0-flash-lite-001")
 
 # 경고 메시지 억제
 warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.symbol_database")
